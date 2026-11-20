@@ -644,31 +644,46 @@ def build_post_market_report() -> str:
 
 # ── Telegram sender ────────────────────────────────────────────────────────────
 
-def send_telegram(message: str, bot_token: str, chat_id: str) -> None:
+def send_telegram(message: str, bot_token: str, chat_ids: list[str]) -> None:
+    """Send the same message to multiple Telegram chat IDs."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    resp = requests.post(url, json=payload, timeout=30)
-    resp.raise_for_status()
-    log.info("Message sent to chat %s. ok=%s", chat_id, resp.json().get("ok"))
+    for chat_id in chat_ids:
+        payload = {
+            "chat_id": chat_id.strip(),
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        resp = requests.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        log.info("Message sent to chat %s. ok=%s", chat_id, resp.json().get("ok"))
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    chat_ids_raw = os.environ.get("TELEGRAM_CHAT_IDS", "")
+    chat_id_single = os.environ.get("TELEGRAM_CHAT_ID", "")
     report_type = os.environ.get("REPORT_TYPE", "pre").strip().lower()
 
-    if not bot_token or not chat_id:
-        log.error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set.")
+    if not bot_token:
+        log.error("TELEGRAM_BOT_TOKEN must be set.")
         sys.exit(1)
 
-    log.info("Building %s-market report (IST time: %s)...", report_type, now_ist().strftime("%Y-%m-%d %I:%M %p"))
+    # Build list of chat IDs (comma-separated, supports both old and new secret names)
+    chat_ids = []
+    if chat_ids_raw:
+        chat_ids.extend([c.strip() for c in chat_ids_raw.split(",") if c.strip()])
+    if chat_id_single:
+        chat_ids.append(chat_id_single.strip())
+
+    if not chat_ids:
+        log.error("TELEGRAM_CHAT_IDS (or TELEGRAM_CHAT_ID) must be set.")
+        sys.exit(1)
+
+    log.info("Building %s-market report for %d chat(s) (IST time: %s)...",
+             report_type, len(chat_ids), now_ist().strftime("%Y-%m-%d %I:%M %p"))
 
     try:
         if report_type == "pre":
@@ -687,7 +702,7 @@ def main() -> None:
             f"Time: {now_ist().strftime('%Y-%m-%d %I:%M %p IST')}"
         )
         try:
-            send_telegram(error_msg, bot_token, chat_id)
+            send_telegram(error_msg, bot_token, chat_ids)
         except Exception:
             pass
         sys.exit(1)
