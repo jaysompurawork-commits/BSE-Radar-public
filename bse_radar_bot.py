@@ -13,6 +13,7 @@ Disclaimer: Technical analysis only. Not SEBI-registered investment advice. Trad
 
 import os
 import sys
+import json
 import logging
 from datetime import datetime, date, timedelta
 
@@ -70,6 +71,65 @@ RSI_OVERBOUGHT = 65
 VOLUME_SURGE = 1.2          # volume must be >= 1.2x average to confirm
 MOMENTUM_STRONG = 1.0       # % change over 5 days to count as strong momentum
 MIN_CONFIDENCE_FOR_PICK = 55  # only show picks with confidence >= this
+
+# ── Accuracy tracking ──────────────────────────────────────────────────────────
+# Logs each prediction so we can measure real accuracy over time.
+ACCURACY_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "prediction_log.jsonl")
+
+
+def log_prediction(ticker: str, name: str, signal: str, confidence: int,
+                   last_price: float, target: float, stop_loss: float,
+                   report_type: str) -> None:
+    """Append a prediction record to the local JSONL accuracy log."""
+    record = {
+        "ticker": ticker,
+        "name": name,
+        "signal": signal,
+        "confidence": confidence,
+        "last_price": last_price,
+        "target": target,
+        "stop_loss": stop_loss,
+        "report_type": report_type,
+        "date": ist_today().isoformat(),
+        "timestamp": now_ist().isoformat(),
+    }
+    try:
+        with open(ACCURACY_LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except Exception as exc:
+        log.warning("Could not write prediction log: %s", exc)
+
+
+def load_predictions(days: int | None = None) -> list[dict]:
+    """Load prediction records from the accuracy log. Optional day filter."""
+    records = []
+    if not os.path.exists(ACCURACY_LOG_FILE):
+        return records
+    try:
+        with open(ACCURACY_LOG_FILE, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except Exception as exc:
+        log.warning("Could not read prediction log: %s", exc)
+    if days is not None:
+        cutoff = ist_today() - timedelta(days=days)
+        filtered = []
+        for r in records:
+            try:
+                r_date = date.fromisoformat(r.get("date", ""))
+                if r_date >= cutoff:
+                    filtered.append(r)
+            except ValueError:
+                continue
+        records = filtered
+    return records
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -217,16 +277,81 @@ def ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
 
-# ── Signal generation (confluence scoring, honest confidence) ──────────────────
+def bb_position(df: pd.DataFrame, period: int = 20) -> tuple[float, float]:
+    """Return (bb_position_0_to_1, bandwidth_pct). Position: 0=lower band, 1=upper band."""
+    if len(df) < period + 1 or not {"High", "Low", "Close"}.issubset(df.columns):
+        return 0.5, 0.0
+    close = _squeeze(df["Close"])
+    ma = close.rolling(window=period).mean()
+    std = close.rolling(window=period).std()
+    upper = ma + 2 * std
+    lower = ma - 2 * std
+    last_close = close.iloc[-1]
+    last_upper = upper.iloc[-1]
+    last_lower = lower.iloc[-1]
+    width = last_upper - last_lower
+    if width == 0 or np.isnan(width):
+        return 0.5, 0.0
+    pos = (last_close - last_lower) / width
+    bandwidth = (width / last_close) * 100 if last_close > 0 else 0.0
+    return float(pos), float(bandwidth)
+
+
+def vwap_confirm(df: pd.DataFrame) -> bool:
+    """Return True if last close is above VWAP (bullish)."""
+    if len(df) < 10 or not {"High", "Low", "Close", "Volume"}.issubset(df.columns):
+        return False
+    close = _squeeze(df["Close"])
+    high = _squeeze(df["High"])
+    low = _squeeze(df["Low"])
+    volume = _squeeze(df["Volume"])
+    typical_price = (high + low + close) / 3
+    vwap = (typical_price * volume).cumsum() / volume.cumsum()
+    return bool(close.iloc[-1] > vwap.iloc[-1])
+
+
+def get_multi_timeframe_bias(ticker: str) -> tuple[float, str]:
+    """Return (bias_score, bias_text) from weekly + daily trend."""
+    try:
+        df_w, _ = fetch_with_fallback(ticker, "1y", "1wk")
+        if df_w.empty or len(df_w) < 10:
+            return 0.0, "Neutral"
+        close_w = _squeeze(df_w["Close"])
+        ema20_w = float(ema(close_w, 20).iloc[-1]) if len(close_w) >= 20 else close_w.iloc[-1]
+        weekly_bullish = float(close_w.iloc[-1]) > ema20_w
+
+        df_d, _ = fetch_with_fallback(ticker, "60d", "1d")
+        if df_d.empty or len(df_d) < 10:
+            return 0.0, "Neutral"
+        close_d = _squeeze(df_d["Close"])
+        ema20_d = float(ema(close_d, 20).iloc[-1]) if len(close_d) >= 20 else close_d.iloc[-1]
+        daily_bullish = float(close_d.iloc[-1]) > ema20_d
+
+        if weekly_bullish and daily_bullish:
+            return 1.0, "Strongly Bullish"
+        if weekly_bullish:
+            return 0.5, "Bullish"
+        if not weekly_bullish and not daily_bullish:
+            return -1.0, "Strongly Bearish"
+        if not weekly_bullish:
+            return -0.5, "Bearish"
+        return 0.0, "Neutral"
+    except Exception as exc:
+        log.warning("Multi-timeframe bias failed for %s: %s", ticker, exc)
+        return 0.0, "Neutral"
+
+
+# ── Signal generation (enhanced confluence scoring, honest confidence) ──────────
 
 SIGNALS = ("STRONG_BUY", "BUY", "WATCH", "SELL", "STRONG_SELL")
 
 
-def generate_signal(df: pd.DataFrame) -> dict:
+def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     """
-    Confluence score 0-5 based on: RSI, MACD, EMA trend, volume, momentum.
+    Enhanced confluence scoring based on: RSI, MACD, EMA trend, volume,
+    momentum, Bollinger Bands position, VWAP, and multi-timeframe bias.
     Returns dict with signal, confidence (honest, capped), rsi, macd_bull,
-    vol_ratio, momentum_pct, last_price, atr, target, stop_loss.
+    vol_ratio, momentum_pct, last_price, atr, target, stop_loss, bb_pos, bias.
     """
     close = _squeeze(df["Close"])
     last_price = float(close.iloc[-1])
@@ -245,7 +370,18 @@ def generate_signal(df: pd.DataFrame) -> dict:
     trend_bullish = ema20 > ema50
     trend_bearish = ema20 < ema50
 
-    score = 0  # -3 to +3
+    # Bollinger Bands position
+    bb_pos, bb_width = bb_position(df)
+    bb_bullish = bb_pos > 0.5  # price in upper half of bands
+    bb_bearish = bb_pos < 0.5  # price in lower half of bands
+
+    # VWAP confirmation
+    vwap_bull = vwap_confirm(df)
+
+    # Multi-timeframe bias
+    bias_score, bias_text = get_multi_timeframe_bias(ticker) if ticker else (0.0, "Neutral")
+
+    score = 0  # -4 to +4
 
     # RSI
     if rsi < RSI_OVERSOLD:
@@ -271,7 +407,13 @@ def generate_signal(df: pd.DataFrame) -> dict:
     elif mom < -MOMENTUM_STRONG:
         score -= 1
 
-    # Volume confirms direction (not a standalone signal)
+    # Bollinger Bands
+    if bb_bullish:
+        score += 1
+    elif bb_bearish:
+        score -= 1
+
+    # Volume confirms direction (not standalone)
     vol_ok = vol >= VOLUME_SURGE
 
     if score >= 3:
@@ -287,15 +429,22 @@ def generate_signal(df: pd.DataFrame) -> dict:
     else:
         signal = "WATCH"
 
-    # Honest confidence: base 45, + per aligned factor, capped at 78.
-    # Never overstate — technicals are probabilistic, not certain.
-    aligned = sum([abs(rsi - 50) > 15, macd_line != 0, trend_bullish or trend_bearish,
-                   vol_ok, abs(mom) > 0.5])
-    confidence = min(78, 45 + aligned * 6)
+    # Honest confidence: base 45, + per aligned factor, capped at 75.
+    aligned = sum([
+        abs(rsi - 50) > 15,
+        macd_line != 0,
+        trend_bullish or trend_bearish,
+        vol_ok,
+        abs(mom) > 0.5,
+        abs(bb_pos - 0.5) > 0.3,
+    ])
+    confidence = min(75, 45 + aligned * 5)
+    if abs(bias_score) >= 0.5:
+        confidence = min(75, confidence + 5)
     if signal == "WATCH":
         confidence = 40
 
-    # ATR-based targets & stop-losses (realistic, not fixed 2%)
+    # ATR-based targets & stop-losses (realistic, not fixed %)
     if atr > 0 and last_price > 0:
         if "BUY" in signal:
             target = last_price + 1.5 * atr
@@ -337,6 +486,10 @@ def generate_signal(df: pd.DataFrame) -> dict:
         "target": round(target, 2),
         "stop_loss": round(stop_loss, 2),
         "trend_bullish": trend_bullish,
+        "bb_pos": round(bb_pos, 2),
+        "bias": bias_text,
+        "bias_score": bias_score,
+        "vwap_bull": vwap_bull,
     }
 
 
@@ -408,7 +561,7 @@ def build_pre_market_report() -> str:
                 skipped += 1
                 log.warning("Skipping %s — insufficient data (source: %s)", ticker, source)
                 continue
-            info = generate_signal(df)
+            info = generate_signal(df, ticker)
             if info["signal"] in ("STRONG_BUY", "BUY") and info["confidence"] >= MIN_CONFIDENCE_FOR_PICK:
                 buy_picks.append((name, info))
             elif info["signal"] in ("STRONG_SELL", "SELL") and info["confidence"] >= MIN_CONFIDENCE_FOR_PICK:
@@ -453,15 +606,26 @@ def build_pre_market_report() -> str:
             rsi_txt = f"RSI {info['rsi']:.0f}"
             vol_txt = f"Vol {info['vol_ratio']:.1f}x"
             mom_txt = f"5d {info['momentum_pct']:+.1f}%"
+            bb_txt = f"BB {info['bb_pos']:.2f}"
+            vwap_txt = "VWAP ✅" if info["vwap_bull"] else "VWAP ⚠️"
+            bias_txt = f"Bias: {info['bias']}"
             lines.append(
                 f"{i}. <b>{name}</b> | {fmt_money(info['last_price'])} | "
                 f"{info['signal']} | Conf: {info['confidence']}%"
             )
-            lines.append(f"   {rsi_txt} · {vol_txt} · {macd_txt} · {mom_txt}")
+            lines.append(
+                f"   {rsi_txt} · {vol_txt} · {macd_txt} · {mom_txt} · "
+                f"{bb_txt} · {vwap_txt} · {bias_txt}"
+            )
             lines.append(
                 f"   🎯 Target: {fmt_money(info['target'])} | "
                 f"SL: {fmt_money(info['stop_loss'])}"
             )
+            # Log prediction for accuracy tracking
+            ticker_key = next((t for t, n in WATCHLIST.items() if n == name), "")
+            log_prediction(ticker_key, name, info["signal"], info["confidence"],
+                           info["last_price"], info["target"], info["stop_loss"],
+                           "pre")
         lines.append("")
 
     if sell_picks:
