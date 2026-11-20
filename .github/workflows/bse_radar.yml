@@ -1,0 +1,73 @@
+name: BSE Radar Bot
+
+on:
+  schedule:
+    # Pre-market: 9:00 AM IST = 3:30 AM UTC — weekdays only
+    - cron: '30 3 * * 1-5'
+    # Post-market: 4:00 PM IST = 10:30 AM UTC — weekdays only
+    - cron: '30 10 * * 1-5'
+
+  # Manual trigger from GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      report_type:
+        description: 'Report type to send'
+        required: true
+        default: 'pre'
+        type: choice
+        options:
+          - pre
+          - post
+
+jobs:
+  pre-market:
+    name: Pre-Market Report (9:00 AM IST)
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '30 3 * * 1-5') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'pre')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install yfinance pandas numpy requests
+
+      - name: Run pre-market report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REPORT_TYPE: pre
+        run: python bse_radar_bot.py
+
+  post-market:
+    name: Post-Market Report (4:00 PM IST)
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '30 10 * * 1-5') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'post')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install yfinance pandas numpy requests
+
+      - name: Run post-market report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REPORT_TYPE: post
+        run: python bse_radar_bot.py
