@@ -708,7 +708,7 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        send_telegram(message, bot_token, chat_id)
+        send_telegram(message, bot_token, chat_ids)
     except Exception as exc:
         log.error("Telegram send failed: %s", exc)
         sys.exit(1)
