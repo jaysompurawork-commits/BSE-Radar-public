@@ -578,48 +578,31 @@ def build_pre_market_report() -> str:
     watch_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
 
     lines = [
-        f"🌅 <b>BSE PRE-MARKET RADAR | {today_str} | {now}</b>",
+        f"🌅 <b>BSE PRE-MARKET RADAR | {today_str}</b>",
         "",
     ]
 
     # Market context
-    ctx_lines = []
     if nifty_level > 0:
-        ctx_lines.append(
-            f"📊 <b>NIFTY50:</b> {nifty_level:,.0f} "
+        lines.append(
+            f"📊 NIFTY50: {nifty_level:,.0f} "
             f"{arrow(nifty_pct)} ({nifty_pct:+.2f}%)"
         )
     if sensex_level > 0:
-        ctx_lines.append(
-            f"📊 <b>SENSEX:</b> {sensex_level:,.0f} "
+        lines.append(
+            f"📊 SENSEX: {sensex_level:,.0f} "
             f"{arrow(sensex_pct)} ({sensex_pct:+.2f}%)"
         )
-    if ctx_lines:
-        lines.extend(ctx_lines)
-        lines.append("")
+    lines.append("")
 
     if buy_picks:
-        lines.append("🟢 <b>TOP BUY PICKS TODAY</b>")
-        lines.append("━━━━━━━━━━━━━━━━━━━━")
-        for i, (name, info) in enumerate(buy_picks[:6], 1):
-            macd_txt = "MACD ✅" if info["macd_bull"] else "MACD ⚠️"
-            rsi_txt = f"RSI {info['rsi']:.0f}"
-            vol_txt = f"Vol {info['vol_ratio']:.1f}x"
-            mom_txt = f"5d {info['momentum_pct']:+.1f}%"
-            bb_txt = f"BB {info['bb_pos']:.2f}"
-            vwap_txt = "VWAP ✅" if info["vwap_bull"] else "VWAP ⚠️"
-            bias_txt = f"Bias: {info['bias']}"
+        lines.append("🟢 <b>BUY PICKS</b>")
+        lines.append("━━━━━━━━━━━━")
+        for i, (name, info) in enumerate(buy_picks[:5], 1):
             lines.append(
                 f"{i}. <b>{name}</b> | {fmt_money(info['last_price'])} | "
-                f"{info['signal']} | Conf: {info['confidence']}%"
-            )
-            lines.append(
-                f"   {rsi_txt} · {vol_txt} · {macd_txt} · {mom_txt} · "
-                f"{bb_txt} · {vwap_txt} · {bias_txt}"
-            )
-            lines.append(
-                f"   🎯 Target: {fmt_money(info['target'])} | "
-                f"SL: {fmt_money(info['stop_loss'])}"
+                f"{info['signal']} | Conf {info['confidence']}% | "
+                f"🎯 {fmt_money(info['target'])} | SL {fmt_money(info['stop_loss'])}"
             )
             # Log prediction for accuracy tracking
             ticker_key = next((t for t, n in WATCHLIST.items() if n == name), "")
@@ -629,47 +612,24 @@ def build_pre_market_report() -> str:
         lines.append("")
 
     if sell_picks:
-        lines.append("🔴 <b>SELL / AVOID TODAY</b>")
-        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append("🔴 <b>SELL / AVOID</b>")
+        lines.append("━━━━━━━━━━━━")
         for i, (name, info) in enumerate(sell_picks[:4], 1):
-            rsi_txt = f"RSI {info['rsi']:.0f}"
-            mom_txt = f"5d {info['momentum_pct']:+.1f}%"
             lines.append(
                 f"{i}. <b>{name}</b> | {fmt_money(info['last_price'])} | "
-                f"{info['signal']} | Conf: {info['confidence']}%"
-            )
-            lines.append(f"   ↘ {rsi_txt} · weakness {mom_txt}")
-        lines.append("")
-
-    if watch_picks and not buy_picks and not sell_picks:
-        lines.append("🟡 <b>WATCH LIST (no strong signal)</b>")
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-        for i, (name, info) in enumerate(watch_picks[:5], 1):
-            lines.append(
-                f"{i}. <b>{name}</b> | {fmt_money(info['last_price'])} | "
-                f"{info['signal']} | Conf: {info['confidence']}%"
+                f"{info['signal']} | Conf {info['confidence']}% | "
+                f"SL {fmt_money(info['stop_loss'])}"
             )
         lines.append("")
 
-    if not buy_picks and not sell_picks and not watch_picks:
-        lines.append("⚪ No strong signals today — market appears neutral.")
+    if not buy_picks and not sell_picks:
+        lines.append("⚪ No strong signals today — market neutral.")
         lines.append("")
-
-    # Mood
-    bull_count = len(buy_picks)
-    bear_count = len(sell_picks)
-    if bull_count >= bear_count * 2 and bull_count > 0:
-        mood = "Bullish 📈"
-    elif bear_count >= bull_count * 2 and bear_count > 0:
-        mood = "Bearish 📉"
-    else:
-        mood = "Cautiously Mixed ↔️"
 
     lines += [
-        f"⚠️ <b>MARKET MOOD:</b> {mood}",
+        f"📊 Mood: {'Bullish 📈' if len(buy_picks) >= len(sell_picks) else 'Bearish 📉' if sell_picks else 'Mixed ↔️'}",
         "",
-        "📊 Data: Real BSE/NSE prices (yfinance) · Targets/SL: ATR-based",
-        "📌 <i>Technical analysis only. Not SEBI-registered advice. Do your own research.</i>",
+        "📌 Not SEBI-registered advice. Do your own research.",
         "🤖 BSE Radar Bot | Pre-market 9:00 AM IST",
     ]
 
@@ -740,32 +700,29 @@ def build_post_market_report() -> str:
                     key=lambda x: x["change_pct"])[:4]
 
     lines = [
-        f"🔔 <b>BSE POST-MARKET REPORT | {today_str} | {now}</b>",
+        f"🔔 <b>BSE POST-MARKET | {today_str}</b>",
         "",
     ]
 
     # Market context
-    ctx_lines = []
     if nifty_level > 0:
         pts = nifty_pct / 100 * nifty_level
-        ctx_lines.append(
-            f"📊 <b>NIFTY50 CLOSE:</b> {nifty_level:,.0f} "
+        lines.append(
+            f"📊 NIFTY50: {nifty_level:,.0f} "
             f"{arrow(nifty_pct)} {abs(pts):,.0f} pts ({nifty_pct:+.2f}%)"
         )
     if sensex_level > 0:
         pts = sensex_pct / 100 * sensex_level
-        ctx_lines.append(
-            f"📊 <b>SENSEX CLOSE:</b> {sensex_level:,.0f} "
+        lines.append(
+            f"📊 SENSEX: {sensex_level:,.0f} "
             f"{arrow(sensex_pct)} {abs(pts):,.0f} pts ({sensex_pct:+.2f}%)"
         )
-    if ctx_lines:
-        lines.extend(ctx_lines)
-        lines.append("")
+    lines.append("")
 
     if gainers:
-        lines.append("🏆 <b>TOP GAINERS TODAY</b>")
-        lines.append("━━━━━━━━━━━━━━━━━━")
-        for i, s in enumerate(gainers, 1):
+        lines.append("🏆 <b>GAINERS</b>")
+        lines.append("━━━━━━━━━━━━")
+        for i, s in enumerate(gainers[:5], 1):
             lines.append(
                 f"{i}. <b>{s['name']}</b> +{s['change_pct']:.1f}% "
                 f"| {fmt_money(s['open'])} → {fmt_money(s['close'])}"
@@ -773,9 +730,9 @@ def build_post_market_report() -> str:
         lines.append("")
 
     if losers:
-        lines.append("📉 <b>TOP LOSERS TODAY</b>")
-        lines.append("━━━━━━━━━━━━━━━━━━")
-        for i, s in enumerate(losers, 1):
+        lines.append("📉 <b>LOSERS</b>")
+        lines.append("━━━━━━━━━━━━")
+        for i, s in enumerate(losers[:4], 1):
             lines.append(
                 f"{i}. <b>{s['name']}</b> {s['change_pct']:.1f}% "
                 f"| {fmt_money(s['open'])} → {fmt_money(s['close'])}"
@@ -783,23 +740,18 @@ def build_post_market_report() -> str:
         lines.append("")
 
     if not gainers and not losers:
-        lines.append("⚪ No significant moves detected today.")
+        lines.append("⚪ No significant moves today.")
         lines.append("")
 
-    # Overall sentiment
     total = len(stock_results)
     up_count = len([s for s in stock_results if s["change_pct"] > 0])
     down_count = total - up_count
     if total > 0:
-        lines.append(
-            f"📊 <b>ADVANCE/DECLINE (watchlist):</b> "
-            f"{up_count} up ↑ | {down_count} down ↓"
-        )
+        lines.append(f"📊 {up_count} up ↑ | {down_count} down ↓")
         lines.append("")
 
     lines += [
-        "📊 Data: Real BSE/NSE intraday prices (yfinance)",
-        "📌 <i>Past performance does not guarantee future results. Not SEBI-registered advice.</i>",
+        "📌 Not SEBI-registered advice. Do your own research.",
         "🤖 BSE Radar Bot | Post-market 4:00 PM IST",
     ]
 
