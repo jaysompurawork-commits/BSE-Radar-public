@@ -838,14 +838,17 @@ def build_pre_market_report() -> str:
 
 
 def build_intraday_report() -> str:
-    """Short intraday update: current prices, top movers, active target/SL hits."""
+    """Intraday update: live BUY/SELL signals with targets/SL during market hours."""
     today_str = ist_today().strftime("%d %b %Y")
     now = now_ist().strftime("%I:%M %p IST")
 
     nifty_level, nifty_pct = get_nifty_level()
     sensex_level, sensex_pct = get_sensex_level()
 
+    buy_picks = []
+    sell_picks = []
     stock_results = []
+
     for ticker, name in WATCHLIST.items():
         try:
             df_intra, src = fetch_with_fallback(ticker, "1d", "5m")
@@ -856,25 +859,39 @@ def build_intraday_report() -> str:
                 tod = df_intra[df_intra.index.tz_localize("UTC").tz_convert(IST).normalize() == today]
             else:
                 tod = df_intra[df_intra.index.tz_convert(IST).normalize() == today]
-            if tod.empty:
+            if tod.empty or len(tod) < 2:
                 continue
-            close_col = _squeeze(tod["Close"])
-            open_col = _squeeze(tod["Open"])
-            high_col = _squeeze(tod["High"])
-            low_col = _squeeze(tod["Low"])
+
+            # Generate a live signal from intraday data
+            info = generate_signal(tod, ticker)
+            close_price = float(_squeeze(tod["Close"]).iloc[-1])
+            open_price = float(_squeeze(tod["Open"]).iloc[0])
+            change_pct = (close_price - open_price) / open_price * 100 if open_price else 0.0
+
             stock_results.append({
                 "name": name,
                 "ticker": ticker,
-                "open": float(open_col.iloc[0]),
-                "close": float(close_col.iloc[-1]),
-                "high": float(high_col.max()),
-                "low": float(low_col.min()),
-                "change_pct": (float(close_col.iloc[-1]) - float(open_col.iloc[0]))
-                              / float(open_col.iloc[0]) * 100 if float(open_col.iloc[0]) else 0.0,
+                "close": close_price,
+                "change_pct": change_pct,
             })
+
+            if info["signal"] in ("STRONG_BUY", "BUY") and info["confidence"] >= MIN_CONFIDENCE_FOR_PICK:
+                buy_picks.append((name, info))
+            elif info["signal"] in ("STRONG_SELL", "SELL") and info["confidence"] >= MIN_CONFIDENCE_FOR_PICK:
+                sell_picks.append((name, info))
         except Exception as exc:
-            log.warning("Intraday failed for %s: %s", ticker, exc)
+            log.warning("Intraday signal failed for %s: %s", ticker, exc)
             continue
+
+    buy_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
+    sell_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
+
+    # Log intraday predictions for accuracy tracking
+    for name, info in buy_picks + sell_picks:
+        ticker_key = next((t for t, n in WATCHLIST.items() if n == name), "")
+        log_prediction(ticker_key, name, info["signal"], info["confidence"],
+                       info["last_price"], info["target"], info["stop_loss"],
+                       "intraday")
 
     stock_results.sort(key=lambda x: x["change_pct"], reverse=True)
     top_gainers = stock_results[:3]
@@ -893,6 +910,32 @@ def build_intraday_report() -> str:
             f"📊 SENSEX: {sensex_level:,.0f} {arrow(sensex_pct)} ({sensex_pct:+.2f}%)"
         )
     lines.append("")
+
+    if buy_picks:
+        lines.append("🟢 <b>BUY PICKS</b>")
+        lines.append("━━━━━━━━━━━━")
+        for i, (name, info) in enumerate(buy_picks[:5], 1):
+            lines.append(
+                f"{i}. <b>{name}</b> | {fmt_money(info['last_price'])} | "
+                f"{info['signal']} | Conf {info['confidence']}% | "
+                f"🎯 {fmt_money(info['target'])} | SL {fmt_money(info['stop_loss'])}"
+            )
+        lines.append("")
+
+    if sell_picks:
+        lines.append("🔴 <b>SELL / AVOID</b>")
+        lines.append("━━━━━━━━━━━━")
+        for i, (name, info) in enumerate(sell_picks[:4], 1):
+            lines.append(
+                f"{i}. <b>{name}</b> | {fmt_money(info['last_price'])} | "
+                f"{info['signal']} | Conf {info['confidence']}% | "
+                f"SL {fmt_money(info['stop_loss'])}"
+            )
+        lines.append("")
+
+    if not buy_picks and not sell_picks:
+        lines.append("⚪ No strong intraday signals yet — market neutral.")
+        lines.append("")
 
     if top_gainers:
         lines.append("🟢 <b>TOP GAINERS</b>")
@@ -914,12 +957,8 @@ def build_intraday_report() -> str:
             )
         lines.append("")
 
-    if not top_gainers and not top_losers:
-        lines.append("⚪ No significant moves yet.")
-        lines.append("")
-
     lines += [
-        "📌 Not SEBI-registered advice. Do your own research.",
+        "📌 Signals use live intraday data. Not SEBI-registered advice.",
         "🤖 BSE Radar Bot | Intraday update",
     ]
 
