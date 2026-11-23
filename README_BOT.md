@@ -42,11 +42,23 @@ Or use `TELEGRAM_CHAT_IDS` for multiple chat IDs separated by commas.
 
 **Pre-market (9:00 AM IST):** BUY/SELL picks with confidence %, target price, stop-loss.
 
-**Intraday (every 30 min):** Nifty/Sensex, top gainers/losers, current prices.
+**Intraday (every 10 min):** Market-open status, BUY/SELL picks with target/SL (same
+reliable daily-data basis as pre-market), live current prices, top gainers/losers.
 
-**Post-market (4:00 PM):** Day summary + **accuracy update** showing how pre-market predictions performed (wins/losses/accuracy %).
+**Post-market (4:00 PM):** Day summary + **accuracy update** showing how previous
+predictions performed (wins/losses/accuracy %) plus a 7-day accuracy trend.
 
-## 5. Data Source
+## 5. Reliability
+
+- **yfinance retries** — failed downloads auto-retry before giving up.
+- **Duplicate protection** — intraday won't re-log the same pick every 10 minutes;
+  the same ticker's pre-market and intraday predictions both count cleanly.
+- **Outcome persistence** — WIN/LOSS results are written back to the prediction log
+  so accuracy survives across GitHub Actions runs.
+- **Message splitting** — long reports are split into chunks under Telegram's
+  4096-char limit, so nothing gets truncated.
+
+## 6. Data Source
 
 All prices are real NSE data fetched via `yfinance`. No mock/fake data.
 

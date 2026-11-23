@@ -22,6 +22,7 @@ import sys
 import json
 import logging
 import subprocess
+import time
 from datetime import datetime, date, timedelta
 
 import requests
@@ -90,7 +91,13 @@ ACCURACY_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 def log_prediction(ticker: str, name: str, signal: str, confidence: int,
                    last_price: float, target: float, stop_loss: float,
                    report_type: str) -> None:
-    """Append a prediction record to the local JSONL accuracy log."""
+    """Append a prediction record to the local JSONL accuracy log.
+
+    Each prediction is appended (pre-market and intraday can both log the
+    same ticker at different price levels). Duplicate counting is handled at
+    evaluation time in evaluate_open_predictions() by keeping the earliest
+    record per ticker per day, so accuracy stats stay clean.
+    """
     record = {
         "ticker": ticker,
         "name": name,
@@ -106,6 +113,22 @@ def log_prediction(ticker: str, name: str, signal: str, confidence: int,
         "outcome_price": None,    # price at which target or SL was hit
     }
     try:
+        # Skip if an identical prediction (ticker + date + signal + levels)
+        # already exists today — prevents intraday ticks from re-logging the
+        # same pick every 10 minutes while allowing genuinely different
+        # pre-market vs intraday predictions to coexist.
+        today = ist_today().isoformat()
+        try:
+            existing = load_predictions()
+            for r in existing:
+                if (r.get("ticker") == ticker and r.get("date") == today
+                        and r.get("signal") == signal
+                        and abs(float(r.get("target", 0) or 0) - target) < 0.01
+                        and abs(float(r.get("stop_loss", 0) or 0) - stop_loss) < 0.01):
+                    log.debug("Skipping duplicate prediction log for %s", ticker)
+                    return
+        except Exception:
+            pass
         with open(ACCURACY_LOG_FILE, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
     except Exception as exc:
@@ -178,6 +201,16 @@ def commit_and_push_log() -> None:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
+def _write_predictions(records: list[dict]) -> None:
+    """Rewrite the entire prediction log (used to persist resolved outcomes)."""
+    try:
+        with open(ACCURACY_LOG_FILE, "w", encoding="utf-8") as fh:
+            for r in records:
+                fh.write(json.dumps(r) + "\n")
+    except Exception as exc:
+        log.warning("Could not rewrite prediction log: %s", exc)
+
+
 def now_ist() -> datetime:
     """Return current time in IST."""
     return datetime.now().astimezone(__import__("zoneinfo").ZoneInfo(IST))
@@ -188,6 +221,16 @@ def ist_today() -> date:
     return now_ist().date()
 
 
+def is_market_open() -> bool:
+    """Return True if BSE/NSE is currently open (Mon-Fri 9:15 AM–3:30 PM IST)."""
+    now = now_ist()
+    if now.weekday() >= 5:  # Saturday/Sunday
+        return False
+    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return market_open <= now <= market_close
+
+
 def to_ist(ts) -> pd.Timestamp:
     """Convert a pandas Timestamp to IST (tz-aware)."""
     if ts.tzinfo is None:
@@ -195,17 +238,27 @@ def to_ist(ts) -> pd.Timestamp:
     return ts.tz_convert(IST)
 
 
-def safe_download(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    """Download yfinance data; return empty DataFrame on any failure."""
-    try:
-        df = yf.download(ticker, period=period, interval=interval,
-                         progress=False, timeout=20)
-        if df is None or df.empty:
+def safe_download(ticker: str, period: str, interval: str, retries: int = 2) -> pd.DataFrame:
+    """Download yfinance data with retries; return empty DataFrame on any failure."""
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            df = yf.download(ticker, period=period, interval=interval,
+                             progress=False, timeout=20)
+            if df is None or df.empty:
+                if attempt < retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                return pd.DataFrame()
+            return df
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            log.warning("yfinance failed for %s: %s", ticker, exc)
             return pd.DataFrame()
-        return df
-    except Exception as exc:
-        log.warning("yfinance failed for %s: %s", ticker, exc)
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 
 def fetch_with_fallback(base_ticker: str, period: str, interval: str) -> tuple[pd.DataFrame, str]:
@@ -591,6 +644,7 @@ def evaluate_open_predictions() -> tuple[list[dict], int, int, int]:
 
     wins = losses = still_open = 0
     updated = []
+    all_records = load_predictions()  # full copy to rewrite with outcomes
 
     # Group by ticker so we download each ticker's intraday data once.
     by_ticker: dict[str, list[dict]] = {}
@@ -626,6 +680,18 @@ def evaluate_open_predictions() -> tuple[list[dict], int, int, int]:
                 r["outcome"] = "OPEN"
                 still_open += 1
                 updated.append(r)
+
+    # Persist resolved outcomes back to the log so they survive across runs.
+    # Match updated records back to the full record list by (ticker, date).
+    try:
+        updated_key = {(r["ticker"], r.get("date", "")): r for r in updated}
+        for i, r in enumerate(all_records):
+            key = (r.get("ticker"), r.get("date", ""))
+            if key in updated_key:
+                all_records[i] = updated_key[key]
+        _write_predictions(all_records)
+    except Exception as exc:
+        log.warning("Could not persist prediction outcomes: %s", exc)
 
     return updated, wins, losses, still_open
 
@@ -839,7 +905,8 @@ def build_intraday_report() -> str:
     top_losers = stock_results[-3:][::-1]
 
     lines = [
-        f"⚡ <b>BSE INTRADAY | {today_str} | {now}</b>",
+        f"⚡ <b>BSE INTRADAY | {today_str} | {now}</b> "
+        f"| {'Market Open 📈' if is_market_open() else 'Market Closed 🔒'}",
         "",
     ]
     if nifty_level > 0:
@@ -918,8 +985,7 @@ def build_post_market_report() -> str:
     for ticker, name in WATCHLIST.items():
         try:
             df_intra, src = fetch_with_fallback(ticker, "5d", "5m")
-            df_daily, _ = fetch_with_fallback(ticker, "5d", "1d")
-            if df_intra.empty or df_daily.empty:
+            if df_intra.empty:
                 log.warning("Skipping %s post-market (no data, src=%s)", ticker, src)
                 continue
 
@@ -1020,6 +1086,16 @@ def build_post_market_report() -> str:
         )
         lines.append(f"🎯 Accuracy: {acc:.0f}% ({wins}/{total_resolved})")
 
+        # Multi-day accuracy trend (last 7 days).
+        all_records = load_predictions(days=7)
+        resolved_week = [r for r in all_records if r.get("outcome") in ("WIN", "LOSS")]
+        if resolved_week:
+            week_wins = sum(1 for r in resolved_week if r["outcome"] == "WIN")
+            week_acc = week_wins / len(resolved_week) * 100
+            lines.append(
+                f"📅 7-day: {week_acc:.0f}% ({week_wins}/{len(resolved_week)})"
+            )
+
         resolved = [r for r in updated if r["outcome"] in ("WIN", "LOSS")]
         if resolved:
             lines.append("")
@@ -1046,19 +1122,55 @@ def build_post_market_report() -> str:
 
 # ── Telegram sender ────────────────────────────────────────────────────────────
 
+# Telegram message length limit (Telegram caps at 4096 chars per message).
+TELEGRAM_MAX_CHARS = 4000
+
+
+def split_message(message: str, max_chars: int = TELEGRAM_MAX_CHARS) -> list[str]:
+    """Split a long message into chunks that respect the Telegram limit,
+    preferring to break at newlines so lines aren't cut mid-way."""
+    if len(message) <= max_chars:
+        return [message]
+    chunks = []
+    current = ""
+    for line in message.split("\n"):
+        # Account for the joining newline.
+        add = line if not current else "\n" + line
+        if len(current) + len(add) > max_chars:
+            if current:
+                chunks.append(current)
+                current = line
+            else:
+                # Single line longer than limit — split it forcibly.
+                chunks.append(line[:max_chars])
+                current = line[max_chars:]
+        else:
+            current += add
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def send_telegram(message: str, bot_token: str, chat_ids: list[str]) -> None:
-    """Send the same message to multiple Telegram chat IDs."""
+    """Send the same message to multiple Telegram chat IDs, splitting long
+    messages into chunks that fit Telegram's 4096-char limit."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    chunks = split_message(message)
     for chat_id in chat_ids:
-        payload = {
-            "chat_id": chat_id.strip(),
-            "text": message,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
-        resp = requests.post(url, json=payload, timeout=30)
-        resp.raise_for_status()
-        log.info("Message sent to chat %s. ok=%s", chat_id, resp.json().get("ok"))
+        for idx, chunk in enumerate(chunks, 1):
+            text = chunk
+            if len(chunks) > 1:
+                text = f"({idx}/{len(chunks)})\n{chunk}"
+            payload = {
+                "chat_id": chat_id.strip(),
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            resp = requests.post(url, json=payload, timeout=30)
+            resp.raise_for_status()
+            log.info("Message sent to chat %s (chunk %d/%d). ok=%s",
+                     chat_id, idx, len(chunks), resp.json().get("ok"))
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
