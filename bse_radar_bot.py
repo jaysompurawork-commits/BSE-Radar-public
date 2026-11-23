@@ -538,10 +538,11 @@ def check_prediction_outcome(record: dict, today_intra: pd.DataFrame) -> dict:
     hit_time = None
 
     # Walk through today's bars in time order to see which level was hit first.
-    for ts in today_intra.index:
-        h = float(high_col.loc[ts])
-        l = float(low_col.loc[ts])
-        c = float(close_col.loc[ts])
+    for i in range(len(today_intra)):
+        h = float(high_col.iloc[i])
+        l = float(low_col.iloc[i])
+        c = float(close_col.iloc[i])
+        ts = today_intra.index[i]
         if "BUY" in signal:
             if h >= target:
                 hit_target = True
@@ -627,74 +628,6 @@ def evaluate_open_predictions() -> tuple[list[dict], int, int, int]:
                 updated.append(r)
 
     return updated, wins, losses, still_open
-
-
-def build_accuracy_report() -> str:
-    """Report on how yesterday's (and older) predictions played out today."""
-    today_str = ist_today().strftime("%d %b %Y")
-    now = now_ist().strftime("%I:%M %p IST")
-
-    updated, wins, losses, still_open = evaluate_open_predictions()
-
-    # Persist updated outcomes back to the log file.
-    if updated:
-        try:
-            all_records = load_predictions()
-            # Replace open records with updated versions.
-            updated_keys = {(r["ticker"], r.get("timestamp")) for r in updated}
-            merged = []
-            for r in all_records:
-                key = (r.get("ticker"), r.get("timestamp"))
-                if key in updated_keys:
-                    merged.append(next(u for u in updated if
-                                       u.get("ticker") == key[0] and
-                                       u.get("timestamp") == key[1]))
-                else:
-                    merged.append(r)
-            with open(ACCURACY_LOG_FILE, "w", encoding="utf-8") as fh:
-                for r in merged:
-                    fh.write(json.dumps(r) + "\n")
-        except Exception as exc:
-            log.warning("Could not persist updated outcomes: %s", exc)
-
-    total_resolved = wins + losses
-    accuracy = (wins / total_resolved * 100) if total_resolved > 0 else 0.0
-
-    lines = [
-        f"📊 <b>ACCURACY UPDATE | {today_str}</b>",
-        "",
-    ]
-
-    if updated:
-        lines.append(
-            f"✅ Wins: {wins}   ❌ Losses: {losses}   ⏳ Still open: {still_open}"
-        )
-        lines.append(f"🎯 Accuracy: {accuracy:.0f}% ({wins}/{total_resolved})")
-        lines.append("")
-        # Show details of resolved predictions
-        resolved = [r for r in updated if r["outcome"] in ("WIN", "LOSS")]
-        if resolved:
-            lines.append("📋 <b>RESOLVED TODAY</b>")
-            lines.append("━━━━━━━━━━━━")
-            for r in resolved[:8]:
-                emoji = "✅" if r["outcome"] == "WIN" else "❌"
-                lines.append(
-                    f"{emoji} <b>{r['name']}</b> | {r['signal']} | "
-                    f"Target ₹{r.get('target', 0):,.2f} / SL ₹{r.get('stop_loss', 0):,.2f} | "
-                    f"Hit ₹{r.get('outcome_price', 0):,.2f}"
-                )
-            lines.append("")
-    else:
-        lines.append("⏳ No previous predictions to evaluate today.")
-        lines.append("")
-
-    lines += [
-        "📌 Predictions logged from pre-market are tracked against intraday prices.",
-        "📌 Not SEBI-registered advice. Do your own research.",
-        "🤖 BSE Radar Bot | Accuracy update",
-    ]
-
-    return "\n".join(lines)
 
 
 # ── Index / market context ─────────────────────────────────────────────────────
@@ -1070,18 +1003,30 @@ def build_post_market_report() -> str:
     # ── Accuracy section: how did previous predictions do? ──
     lines.append("📊 <b>ACCURACY — PREDICTION OUTCOMES</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    records = load_predictions()
-    recent = [r for r in records if r.get("date") == (ist_today() - timedelta(days=1)).isoformat()]
-    if recent:
-        wins = len([r for r in recent if r.get("outcome") == "WIN"])
-        losses = len([r for r in recent if r.get("outcome") == "LOSS"])
-        open_ = len([r for r in recent if r.get("outcome") in (None, "OPEN")])
-        total_r = wins + losses
-        acc = (wins / total_r * 100) if total_r > 0 else 0.0
-        lines.append(f"✅ Wins: {wins}   ❌ Losses: {losses}   ⏳ Open: {open_}")
-        lines.append(f"🎯 Yesterday's accuracy: {acc:.0f}%")
-    else:
-        lines.append("⏳ No predictions from yesterday to evaluate.")
+    try:
+        updated, wins, losses, still_open = evaluate_open_predictions()
+        total_resolved = wins + losses
+        acc = (wins / total_resolved * 100) if total_resolved > 0 else 0.0
+        lines.append(
+            f"✅ Wins: {wins}   ❌ Losses: {losses}   ⏳ Open: {still_open}"
+        )
+        lines.append(f"🎯 Accuracy: {acc:.0f}% ({wins}/{total_resolved})")
+
+        resolved = [r for r in updated if r["outcome"] in ("WIN", "LOSS")]
+        if resolved:
+            lines.append("")
+            lines.append("📋 <b>RESOLVED TODAY</b>")
+            lines.append("━━━━━━━━━━━━")
+            for r in resolved[:8]:
+                emoji = "✅" if r["outcome"] == "WIN" else "❌"
+                lines.append(
+                    f"{emoji} <b>{r['name']}</b> | {r['signal']} | "
+                    f"Target ₹{r.get('target', 0):,.2f} / SL ₹{r.get('stop_loss', 0):,.2f} | "
+                    f"Hit ₹{r.get('outcome_price', 0):,.2f}"
+                )
+    except Exception as exc:
+        log.warning("Accuracy evaluation failed: %s", exc)
+        lines.append("⏳ Could not evaluate prediction outcomes today.")
     lines.append("")
     lines += [
         "📌 Not SEBI-registered advice. Do your own research.",
@@ -1164,7 +1109,9 @@ def main() -> None:
         sys.exit(1)
 
     # Persist prediction log so accuracy carries across GitHub Actions runs.
-    commit_and_push_log()
+    # Only commit on pre/post runs (not every intraday tick).
+    if report_type in ("pre", "post"):
+        commit_and_push_log()
 
     log.info("Done.")
 

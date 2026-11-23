@@ -53,10 +53,10 @@ jobs:
         run: python bse_radar_bot.py
 
   intraday:
-    name: Intraday Update (every 30 min during market hours)
+    name: Intraday Update (every 10 min during market hours)
     runs-on: ubuntu-latest
     if: |
-      (github.event_name == 'schedule' && github.event.schedule == '*/30 4-9 * * 1-5') ||
+      (github.event_name == 'schedule' && github.event.schedule == '*/10 4-9 * * 1-5') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'intraday')
 
     steps:
