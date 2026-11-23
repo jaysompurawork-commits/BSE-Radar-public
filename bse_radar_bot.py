@@ -1,20 +1,27 @@
 """
-BSE Radar Bot — Production v2.0
-Sends pre-market (9:00 AM IST) and post-market (4:00 PM IST) reports to Telegram.
-Uses REAL BSE/NSE data via yfinance (.BO primary, .NS fallback). Runs on GitHub Actions — no PC required.
+BSE Radar Bot — Production v3.0
+Sends pre-market (9:00 AM IST), intraday updates (every 30 min during market
+hours), and post-market (4:00 PM IST) reports to Telegram.
+Uses REAL BSE/NSE data via yfinance (.BO primary, .NS fallback). Runs on GitHub Actions.
 
 Env vars required:
   TELEGRAM_BOT_TOKEN  — bot token from @BotFather
   TELEGRAM_CHAT_ID    — group/channel chat ID (negative number for groups)
-  REPORT_TYPE         — "pre" or "post"
+  REPORT_TYPE         — "pre", "intraday", or "post"
 
-Disclaimer: Technical analysis only. Not SEBI-registered investment advice. Trade at your own risk.
+Optional (for committing prediction log back to repo so accuracy persists):
+  GITHUB_TOKEN        — auto-provided by GitHub Actions
+  GITHUB_REPOSITORY   — auto-provided by GitHub Actions
+
+Disclaimer: Technical analysis only. Not SEBI-registered investment advice.
+Trade at your own risk.
 """
 
 import os
 import sys
 import json
 import logging
+import subprocess
 from datetime import datetime, date, timedelta
 
 import requests
@@ -74,6 +81,8 @@ MIN_CONFIDENCE_FOR_PICK = 55  # only show picks with confidence >= this
 
 # ── Accuracy tracking ──────────────────────────────────────────────────────────
 # Logs each prediction so we can measure real accuracy over time.
+# We commit this back to the repo after each run so it persists across
+# GitHub Actions runs (each run gets a fresh checkout otherwise).
 ACCURACY_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "prediction_log.jsonl")
 
@@ -93,6 +102,8 @@ def log_prediction(ticker: str, name: str, signal: str, confidence: int,
         "report_type": report_type,
         "date": ist_today().isoformat(),
         "timestamp": now_ist().isoformat(),
+        "outcome": None,          # "WIN" / "LOSS" / "OPEN"
+        "outcome_price": None,    # price at which target or SL was hit
     }
     try:
         with open(ACCURACY_LOG_FILE, "a", encoding="utf-8") as fh:
@@ -132,7 +143,40 @@ def load_predictions(days: int | None = None) -> list[dict]:
     return records
 
 
+def commit_and_push_log() -> None:
+    """Commit prediction_log.jsonl back to the repo so accuracy persists across runs."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if not token or not repo:
+        log.debug("Skipping git commit — GITHUB_TOKEN or GITHUB_REPOSITORY not set")
+        return
+    if not os.path.exists(ACCURACY_LOG_FILE):
+        return
+    try:
+        subprocess.run(["git", "config", "user.name", "GitHub Actions"],
+                       check=False, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "github-actions@github.com"],
+                       check=False, capture_output=True)
+        subprocess.run(["git", "add", ACCURACY_LOG_FILE],
+                       check=False, capture_output=True)
+        result = subprocess.run(["git", "diff", "--cached", "--quiet"],
+                                capture_output=True)
+        if result.returncode == 0:
+            log.info("No changes to prediction log — nothing to commit")
+            return
+        subprocess.run(["git", "commit", "-m", f"Update prediction log {ist_today().isoformat()}"],
+                       check=False, capture_output=True)
+        # Push using token-based auth
+        remote_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+        subprocess.run(["git", "push", remote_url, "HEAD:main"],
+                       check=False, capture_output=True)
+        log.info("Prediction log committed and pushed.")
+    except Exception as exc:
+        log.warning("Could not commit/push prediction log: %s", exc)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
 
 def now_ist() -> datetime:
     """Return current time in IST."""
@@ -167,10 +211,6 @@ def safe_download(ticker: str, period: str, interval: str) -> pd.DataFrame:
 def fetch_with_fallback(base_ticker: str, period: str, interval: str) -> tuple[pd.DataFrame, str]:
     """
     Try BSE (.BO) first, then NSE (.NS) fallback.
-    BSE data via yfinance is often sparse, so a source is only accepted
-    if it returns enough rows to compute indicators. BSE and NSE list the
-    same stocks at nearly identical prices, so the .NS fallback keeps data
-    accurate and matching what you see on BSE/AngleOne.
     Returns (dataframe, source_suffix_used).
     """
     min_rows = 25 if interval == "1d" else 40
@@ -179,7 +219,6 @@ def fetch_with_fallback(base_ticker: str, period: str, interval: str) -> tuple[p
         df = safe_download(ticker, period, interval)
         if not df.empty and len(df) >= min_rows:
             return df, suffix
-    # Last resort: return whatever we got (even if sparse) so we don't skip silently
     for suffix in (".BO", ".NS"):
         ticker = base_ticker.replace(".BO", "").replace(".NS", "") + suffix
         df = safe_download(ticker, period, interval)
@@ -195,6 +234,7 @@ def last_close(df: pd.DataFrame) -> float:
 
 
 # ── Technical indicators ───────────────────────────────────────────────────────
+
 
 def compute_rsi(series: pd.Series, period: int = 14) -> float:
     """Return the latest RSI value; 50.0 if insufficient data."""
@@ -341,17 +381,15 @@ def get_multi_timeframe_bias(ticker: str) -> tuple[float, str]:
         return 0.0, "Neutral"
 
 
-# ── Signal generation (enhanced confluence scoring, honest confidence) ──────────
+# ── Signal generation ──────────────────────────────────────────────────────────
 
 SIGNALS = ("STRONG_BUY", "BUY", "WATCH", "SELL", "STRONG_SELL")
 
 
 def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     """
-    Enhanced confluence scoring based on: RSI, MACD, EMA trend, volume,
-    momentum, Bollinger Bands position, VWAP, and multi-timeframe bias.
-    Returns dict with signal, confidence (honest, capped), rsi, macd_bull,
-    vol_ratio, momentum_pct, last_price, atr, target, stop_loss, bb_pos, bias.
+    Confluence scoring based on RSI, MACD, EMA trend, volume, momentum,
+    Bollinger Bands, VWAP, and multi-timeframe bias.
     """
     close = _squeeze(df["Close"])
     last_price = float(close.iloc[-1])
@@ -364,56 +402,41 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     vol = volume_ratio(df)
     mom = price_momentum(close, days=5)
 
-    # EMA trend (20 vs 50)
     ema20 = float(ema(close, 20).iloc[-1]) if len(close) >= 20 else last_price
     ema50 = float(ema(close, 50).iloc[-1]) if len(close) >= 50 else last_price
     trend_bullish = ema20 > ema50
     trend_bearish = ema20 < ema50
 
-    # Bollinger Bands position
-    bb_pos, bb_width = bb_position(df)
-    bb_bullish = bb_pos > 0.5  # price in upper half of bands
-    bb_bearish = bb_pos < 0.5  # price in lower half of bands
+    bb_pos, _ = bb_position(df)
+    bb_bullish = bb_pos > 0.5
+    bb_bearish = bb_pos < 0.5
 
-    # VWAP confirmation
     vwap_bull = vwap_confirm(df)
 
-    # Multi-timeframe bias
     bias_score, bias_text = get_multi_timeframe_bias(ticker) if ticker else (0.0, "Neutral")
 
     score = 0  # -4 to +4
-
-    # RSI
     if rsi < RSI_OVERSOLD:
         score += 1
     elif rsi > RSI_OVERBOUGHT:
         score -= 1
-
-    # MACD
     if macd_bull:
         score += 1
     else:
         score -= 1
-
-    # EMA trend
     if trend_bullish:
         score += 1
     elif trend_bearish:
         score -= 1
-
-    # Momentum
     if mom > MOMENTUM_STRONG:
         score += 1
     elif mom < -MOMENTUM_STRONG:
         score -= 1
-
-    # Bollinger Bands
     if bb_bullish:
         score += 1
     elif bb_bearish:
         score -= 1
 
-    # Volume confirms direction (not standalone)
     vol_ok = vol >= VOLUME_SURGE
 
     if score >= 3:
@@ -429,7 +452,6 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     else:
         signal = "WATCH"
 
-    # Honest confidence: base 45, + per aligned factor, capped at 75.
     aligned = sum([
         abs(rsi - 50) > 15,
         macd_line != 0,
@@ -444,7 +466,6 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     if signal == "WATCH":
         confidence = 40
 
-    # ATR-based targets & stop-losses (realistic, not fixed %)
     if atr > 0 and last_price > 0:
         if "BUY" in signal:
             target = last_price + 1.5 * atr
@@ -466,7 +487,6 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
             target = last_price
             stop_loss = last_price
 
-    # Ensure SL < target for buys, SL > target for sells
     if "BUY" in signal and stop_loss >= target:
         stop_loss = last_price * 0.985
         target = last_price * 1.02
@@ -493,12 +513,196 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     }
 
 
+# ── Outcome checking for previous predictions ──────────────────────────────────
+
+def check_prediction_outcome(record: dict, today_intra: pd.DataFrame) -> dict:
+    """
+    Given an old prediction and today's intraday data, determine if the target
+    or stop-loss was hit during today's session. Returns an updated record copy.
+    """
+    result = dict(record)
+    target = record.get("target")
+    stop_loss = record.get("stop_loss")
+    signal = record.get("signal", "")
+    if target is None or stop_loss is None or today_intra.empty:
+        result["outcome"] = "OPEN"
+        return result
+
+    high_col = _squeeze(today_intra["High"])
+    low_col = _squeeze(today_intra["Low"])
+    close_col = _squeeze(today_intra["Close"])
+
+    hit_target = False
+    hit_sl = False
+    hit_price = None
+    hit_time = None
+
+    # Walk through today's bars in time order to see which level was hit first.
+    for ts in today_intra.index:
+        h = float(high_col.loc[ts])
+        l = float(low_col.loc[ts])
+        c = float(close_col.loc[ts])
+        if "BUY" in signal:
+            if h >= target:
+                hit_target = True
+                hit_price = target
+                hit_time = ts
+                break
+            if l <= stop_loss:
+                hit_sl = True
+                hit_price = stop_loss
+                hit_time = ts
+                break
+        elif "SELL" in signal:
+            if l <= target:
+                hit_target = True
+                hit_price = target
+                hit_time = ts
+                break
+            if h >= stop_loss:
+                hit_sl = True
+                hit_price = stop_loss
+                hit_time = ts
+                break
+
+    if hit_target:
+        result["outcome"] = "WIN"
+    elif hit_sl:
+        result["outcome"] = "LOSS"
+    else:
+        # Neither hit — use today's close to mark open
+        result["outcome"] = "OPEN"
+        result["outcome_price"] = float(close_col.iloc[-1])
+    result["outcome_price"] = hit_price
+    result["outcome_time"] = str(hit_time) if hit_time is not None else None
+    return result
+
+
+def evaluate_open_predictions() -> tuple[list[dict], int, int, int]:
+    """
+    Evaluate all predictions that still have outcome OPEN (from previous days)
+    against today's intraday data. Returns (updated_records, wins, losses, open).
+    """
+    records = load_predictions()
+    open_records = [r for r in records if r.get("outcome") in (None, "OPEN")]
+    if not open_records:
+        return [], 0, 0, 0
+
+    wins = losses = still_open = 0
+    updated = []
+
+    # Group by ticker so we download each ticker's intraday data once.
+    by_ticker: dict[str, list[dict]] = {}
+    for r in open_records:
+        by_ticker.setdefault(r["ticker"], []).append(r)
+
+    for ticker, recs in by_ticker.items():
+        try:
+            df_intra, _ = fetch_with_fallback(ticker, "1d", "5m")
+            if df_intra.empty:
+                for r in recs:
+                    r["outcome"] = "OPEN"
+                    still_open += 1
+                    updated.append(r)
+                continue
+            today = pd.Timestamp(ist_today())
+            if df_intra.index.tz is None:
+                tod = df_intra[df_intra.index.tz_localize("UTC").tz_convert(IST).normalize() == today]
+            else:
+                tod = df_intra[df_intra.index.tz_convert(IST).normalize() == today]
+            for r in recs:
+                r = check_prediction_outcome(r, tod)
+                if r["outcome"] == "WIN":
+                    wins += 1
+                elif r["outcome"] == "LOSS":
+                    losses += 1
+                else:
+                    still_open += 1
+                updated.append(r)
+        except Exception as exc:
+            log.warning("Outcome check failed for %s: %s", ticker, exc)
+            for r in recs:
+                r["outcome"] = "OPEN"
+                still_open += 1
+                updated.append(r)
+
+    return updated, wins, losses, still_open
+
+
+def build_accuracy_report() -> str:
+    """Report on how yesterday's (and older) predictions played out today."""
+    today_str = ist_today().strftime("%d %b %Y")
+    now = now_ist().strftime("%I:%M %p IST")
+
+    updated, wins, losses, still_open = evaluate_open_predictions()
+
+    # Persist updated outcomes back to the log file.
+    if updated:
+        try:
+            all_records = load_predictions()
+            # Replace open records with updated versions.
+            updated_keys = {(r["ticker"], r.get("timestamp")) for r in updated}
+            merged = []
+            for r in all_records:
+                key = (r.get("ticker"), r.get("timestamp"))
+                if key in updated_keys:
+                    merged.append(next(u for u in updated if
+                                       u.get("ticker") == key[0] and
+                                       u.get("timestamp") == key[1]))
+                else:
+                    merged.append(r)
+            with open(ACCURACY_LOG_FILE, "w", encoding="utf-8") as fh:
+                for r in merged:
+                    fh.write(json.dumps(r) + "\n")
+        except Exception as exc:
+            log.warning("Could not persist updated outcomes: %s", exc)
+
+    total_resolved = wins + losses
+    accuracy = (wins / total_resolved * 100) if total_resolved > 0 else 0.0
+
+    lines = [
+        f"📊 <b>ACCURACY UPDATE | {today_str}</b>",
+        "",
+    ]
+
+    if updated:
+        lines.append(
+            f"✅ Wins: {wins}   ❌ Losses: {losses}   ⏳ Still open: {still_open}"
+        )
+        lines.append(f"🎯 Accuracy: {accuracy:.0f}% ({wins}/{total_resolved})")
+        lines.append("")
+        # Show details of resolved predictions
+        resolved = [r for r in updated if r["outcome"] in ("WIN", "LOSS")]
+        if resolved:
+            lines.append("📋 <b>RESOLVED TODAY</b>")
+            lines.append("━━━━━━━━━━━━")
+            for r in resolved[:8]:
+                emoji = "✅" if r["outcome"] == "WIN" else "❌"
+                lines.append(
+                    f"{emoji} <b>{r['name']}</b> | {r['signal']} | "
+                    f"Target ₹{r.get('target', 0):,.2f} / SL ₹{r.get('stop_loss', 0):,.2f} | "
+                    f"Hit ₹{r.get('outcome_price', 0):,.2f}"
+                )
+            lines.append("")
+    else:
+        lines.append("⏳ No previous predictions to evaluate today.")
+        lines.append("")
+
+    lines += [
+        "📌 Predictions logged from pre-market are tracked against intraday prices.",
+        "📌 Not SEBI-registered advice. Do your own research.",
+        "🤖 BSE Radar Bot | Accuracy update",
+    ]
+
+    return "\n".join(lines)
+
+
 # ── Index / market context ─────────────────────────────────────────────────────
+
 
 def get_index_level(ticker: str, days: int = 5) -> tuple[float, float]:
     """Return (level, change_pct) for an index. Both 0.0 on failure."""
     try:
-        # Index tickers (^NSEI, ^BSESN) are NOT BSE/NSE suffixed — fetch directly.
         df = safe_download(ticker, f"{days}d", "1d")
         if df.empty or len(df) < 2:
             return 0.0, 0.0
@@ -551,7 +755,6 @@ def build_pre_market_report() -> str:
 
     buy_picks = []
     sell_picks = []
-    watch_picks = []
     skipped = 0
 
     for ticker, name in WATCHLIST.items():
@@ -566,8 +769,6 @@ def build_pre_market_report() -> str:
                 buy_picks.append((name, info))
             elif info["signal"] in ("STRONG_SELL", "SELL") and info["confidence"] >= MIN_CONFIDENCE_FOR_PICK:
                 sell_picks.append((name, info))
-            else:
-                watch_picks.append((name, info))
         except Exception as exc:
             log.warning("Signal failed for %s: %s", ticker, exc)
             skipped += 1
@@ -575,14 +776,19 @@ def build_pre_market_report() -> str:
 
     buy_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
     sell_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
-    watch_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
+
+    # Log predictions for accuracy tracking
+    for name, info in buy_picks + sell_picks:
+        ticker_key = next((t for t, n in WATCHLIST.items() if n == name), "")
+        log_prediction(ticker_key, name, info["signal"], info["confidence"],
+                       info["last_price"], info["target"], info["stop_loss"],
+                       "pre")
 
     lines = [
-        f"🌅 <b>BSE PRE-MARKET RADAR | {today_str}</b>",
+        f"🌅 <b>BSE PRE-MARKET | {today_str}</b>",
         "",
     ]
 
-    # Market context
     if nifty_level > 0:
         lines.append(
             f"📊 NIFTY50: {nifty_level:,.0f} "
@@ -604,11 +810,6 @@ def build_pre_market_report() -> str:
                 f"{info['signal']} | Conf {info['confidence']}% | "
                 f"🎯 {fmt_money(info['target'])} | SL {fmt_money(info['stop_loss'])}"
             )
-            # Log prediction for accuracy tracking
-            ticker_key = next((t for t, n in WATCHLIST.items() if n == name), "")
-            log_prediction(ticker_key, name, info["signal"], info["confidence"],
-                           info["last_price"], info["target"], info["stop_loss"],
-                           "pre")
         lines.append("")
 
     if sell_picks:
@@ -636,8 +837,8 @@ def build_pre_market_report() -> str:
     return "\n".join(lines)
 
 
-def build_post_market_report() -> str:
-    """Post-market report: real intraday results, sent at 4:00 PM IST."""
+def build_intraday_report() -> str:
+    """Short intraday update: current prices, top movers, active target/SL hits."""
     today_str = ist_today().strftime("%d %b %Y")
     now = now_ist().strftime("%I:%M %p IST")
 
@@ -645,7 +846,95 @@ def build_post_market_report() -> str:
     sensex_level, sensex_pct = get_sensex_level()
 
     stock_results = []
+    for ticker, name in WATCHLIST.items():
+        try:
+            df_intra, src = fetch_with_fallback(ticker, "1d", "5m")
+            if df_intra.empty:
+                continue
+            today = pd.Timestamp(ist_today())
+            if df_intra.index.tz is None:
+                tod = df_intra[df_intra.index.tz_localize("UTC").tz_convert(IST).normalize() == today]
+            else:
+                tod = df_intra[df_intra.index.tz_convert(IST).normalize() == today]
+            if tod.empty:
+                continue
+            close_col = _squeeze(tod["Close"])
+            open_col = _squeeze(tod["Open"])
+            high_col = _squeeze(tod["High"])
+            low_col = _squeeze(tod["Low"])
+            stock_results.append({
+                "name": name,
+                "ticker": ticker,
+                "open": float(open_col.iloc[0]),
+                "close": float(close_col.iloc[-1]),
+                "high": float(high_col.max()),
+                "low": float(low_col.min()),
+                "change_pct": (float(close_col.iloc[-1]) - float(open_col.iloc[0]))
+                              / float(open_col.iloc[0]) * 100 if float(open_col.iloc[0]) else 0.0,
+            })
+        except Exception as exc:
+            log.warning("Intraday failed for %s: %s", ticker, exc)
+            continue
 
+    stock_results.sort(key=lambda x: x["change_pct"], reverse=True)
+    top_gainers = stock_results[:3]
+    top_losers = stock_results[-3:][::-1]
+
+    lines = [
+        f"⚡ <b>BSE INTRADAY | {today_str} | {now}</b>",
+        "",
+    ]
+    if nifty_level > 0:
+        lines.append(
+            f"📊 NIFTY50: {nifty_level:,.0f} {arrow(nifty_pct)} ({nifty_pct:+.2f}%)"
+        )
+    if sensex_level > 0:
+        lines.append(
+            f"📊 SENSEX: {sensex_level:,.0f} {arrow(sensex_pct)} ({sensex_pct:+.2f}%)"
+        )
+    lines.append("")
+
+    if top_gainers:
+        lines.append("🟢 <b>TOP GAINERS</b>")
+        lines.append("━━━━━━━━━━━━")
+        for i, s in enumerate(top_gainers, 1):
+            lines.append(
+                f"{i}. <b>{s['name']}</b> +{s['change_pct']:.1f}% "
+                f"| {fmt_money(s['close'])}"
+            )
+        lines.append("")
+
+    if top_losers:
+        lines.append("🔴 <b>TOP LOSERS</b>")
+        lines.append("━━━━━━━━━━━━")
+        for i, s in enumerate(top_losers, 1):
+            lines.append(
+                f"{i}. <b>{s['name']}</b> {s['change_pct']:.1f}% "
+                f"| {fmt_money(s['close'])}"
+            )
+        lines.append("")
+
+    if not top_gainers and not top_losers:
+        lines.append("⚪ No significant moves yet.")
+        lines.append("")
+
+    lines += [
+        "📌 Not SEBI-registered advice. Do your own research.",
+        "🤖 BSE Radar Bot | Intraday update",
+    ]
+
+    return "\n".join(lines)
+
+
+def build_post_market_report() -> str:
+    """Post-market report: real intraday results + accuracy of previous predictions."""
+    today_str = ist_today().strftime("%d %b %Y")
+    now = now_ist().strftime("%I:%M %p IST")
+
+    nifty_level, nifty_pct = get_nifty_level()
+    sensex_level, sensex_pct = get_sensex_level()
+
+    stock_results = []
     for ticker, name in WATCHLIST.items():
         try:
             df_intra, src = fetch_with_fallback(ticker, "5d", "5m")
@@ -661,7 +950,6 @@ def build_post_market_report() -> str:
                 today_intra = df_intra[df_intra.index.tz_convert(IST).normalize() == today]
 
             if today_intra.empty:
-                # Market may be closed today or no intraday yet — use last session
                 today_intra = df_intra.tail(78)
 
             close_col = _squeeze(today_intra["Close"])
@@ -672,30 +960,22 @@ def build_post_market_report() -> str:
             close_price = float(close_col.iloc[-1])
             day_change_pct = (close_price - open_price) / open_price * 100 if open_price else 0.0
 
-            vol_today = float(today_intra["Volume"].sum()) if "Volume" in today_intra.columns else 0.0
-            vol_avg = float(df_daily["Volume"].mean()) if "Volume" in df_daily.columns else 0.0
-
-            high_price = float(high_col.max()) if len(high_col) else close_price
-            low_price = float(low_col.min()) if len(low_col) else close_price
-
             stock_results.append({
                 "name": name,
                 "ticker": ticker,
                 "source": src,
                 "open": open_price,
                 "close": close_price,
-                "high": high_price,
-                "low": low_price,
+                "high": float(high_col.max()) if len(high_col) else close_price,
+                "low": float(low_col.min()) if len(low_col) else close_price,
                 "change_pct": day_change_pct,
-                "volume": vol_today,
-                "vol_avg": vol_avg,
             })
         except Exception as exc:
             log.warning("Post-market calc failed for %s: %s", ticker, exc)
             continue
 
     gainers = sorted([s for s in stock_results if s["change_pct"] > 0],
-                     key=lambda x: x["change_pct"], reverse=True)[:6]
+                     key=lambda x: x["change_pct"], reverse=True)[:5]
     losers = sorted([s for s in stock_results if s["change_pct"] < 0],
                     key=lambda x: x["change_pct"])[:4]
 
@@ -703,8 +983,6 @@ def build_post_market_report() -> str:
         f"🔔 <b>BSE POST-MARKET | {today_str}</b>",
         "",
     ]
-
-    # Market context
     if nifty_level > 0:
         pts = nifty_pct / 100 * nifty_level
         lines.append(
@@ -722,7 +1000,7 @@ def build_post_market_report() -> str:
     if gainers:
         lines.append("🏆 <b>GAINERS</b>")
         lines.append("━━━━━━━━━━━━")
-        for i, s in enumerate(gainers[:5], 1):
+        for i, s in enumerate(gainers, 1):
             lines.append(
                 f"{i}. <b>{s['name']}</b> +{s['change_pct']:.1f}% "
                 f"| {fmt_money(s['open'])} → {fmt_money(s['close'])}"
@@ -732,7 +1010,7 @@ def build_post_market_report() -> str:
     if losers:
         lines.append("📉 <b>LOSERS</b>")
         lines.append("━━━━━━━━━━━━")
-        for i, s in enumerate(losers[:4], 1):
+        for i, s in enumerate(losers, 1):
             lines.append(
                 f"{i}. <b>{s['name']}</b> {s['change_pct']:.1f}% "
                 f"| {fmt_money(s['open'])} → {fmt_money(s['close'])}"
@@ -750,6 +1028,22 @@ def build_post_market_report() -> str:
         lines.append(f"📊 {up_count} up ↑ | {down_count} down ↓")
         lines.append("")
 
+    # ── Accuracy section: how did previous predictions do? ──
+    lines.append("📊 <b>ACCURACY — PREDICTION OUTCOMES</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    records = load_predictions()
+    recent = [r for r in records if r.get("date") == (ist_today() - timedelta(days=1)).isoformat()]
+    if recent:
+        wins = len([r for r in recent if r.get("outcome") == "WIN"])
+        losses = len([r for r in recent if r.get("outcome") == "LOSS"])
+        open_ = len([r for r in recent if r.get("outcome") in (None, "OPEN")])
+        total_r = wins + losses
+        acc = (wins / total_r * 100) if total_r > 0 else 0.0
+        lines.append(f"✅ Wins: {wins}   ❌ Losses: {losses}   ⏳ Open: {open_}")
+        lines.append(f"🎯 Yesterday's accuracy: {acc:.0f}%")
+    else:
+        lines.append("⏳ No predictions from yesterday to evaluate.")
+    lines.append("")
     lines += [
         "📌 Not SEBI-registered advice. Do your own research.",
         "🤖 BSE Radar Bot | Post-market 4:00 PM IST",
@@ -787,7 +1081,6 @@ def main() -> None:
         log.error("TELEGRAM_BOT_TOKEN must be set.")
         sys.exit(1)
 
-    # Build list of chat IDs (comma-separated, supports both old and new secret names)
     chat_ids = []
     if chat_ids_raw:
         chat_ids.extend([c.strip() for c in chat_ids_raw.split(",") if c.strip()])
@@ -804,16 +1097,18 @@ def main() -> None:
     try:
         if report_type == "pre":
             message = build_pre_market_report()
+        elif report_type == "intraday":
+            message = build_intraday_report()
         elif report_type == "post":
             message = build_post_market_report()
         else:
-            log.error("REPORT_TYPE must be 'pre' or 'post', got: %s", report_type)
+            log.error("REPORT_TYPE must be 'pre', 'intraday', or 'post', got: %s", report_type)
             sys.exit(1)
     except Exception as exc:
         log.exception("Report build failed: %s", exc)
         error_msg = (
             f"⚠️ <b>BSE Radar Bot Error</b>\n"
-            f"Could not build {report_type}-market report.\n"
+            f"Could not build {report_type} report.\n"
             f"Error: {exc}\n"
             f"Time: {now_ist().strftime('%Y-%m-%d %I:%M %p IST')}"
         )
@@ -828,6 +1123,9 @@ def main() -> None:
     except Exception as exc:
         log.error("Telegram send failed: %s", exc)
         sys.exit(1)
+
+    # Persist prediction log so accuracy carries across GitHub Actions runs.
+    commit_and_push_log()
 
     log.info("Done.")
 
