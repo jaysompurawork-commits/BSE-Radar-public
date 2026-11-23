@@ -23,6 +23,7 @@ import json
 import logging
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timedelta
 
 import requests
@@ -31,6 +32,15 @@ import pandas as pd
 import yfinance as yf
 
 IST = "Asia/Kolkata"
+
+# Silence yfinance's noisy per-ticker stderr logs (its own logger + urllib3).
+logging.getLogger("yfinance").setLevel(logging.ERROR)
+logging.getLogger("yfinance.tickers").setLevel(logging.ERROR)
+try:
+    import urllib3
+    urllib3.disable_warnings()
+except Exception:
+    pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -238,25 +248,28 @@ def to_ist(ts) -> pd.Timestamp:
     return ts.tz_convert(IST)
 
 
-def safe_download(ticker: str, period: str, interval: str, retries: int = 2) -> pd.DataFrame:
-    """Download yfinance data with retries; return empty DataFrame on any failure."""
+def safe_download(ticker: str, period: str, interval: str, retries: int = 1) -> pd.DataFrame:
+    """Download yfinance data with retries; return empty DataFrame on failure.
+
+    Fails fast: only 2 attempts with a short sleep, so a single flaky ticker
+    doesn't hold up the whole report.
+    """
     last_exc = None
     for attempt in range(retries + 1):
         try:
             df = yf.download(ticker, period=period, interval=interval,
-                             progress=False, timeout=20)
+                             progress=False, timeout=15)
             if df is None or df.empty:
                 if attempt < retries:
-                    time.sleep(1.5 * (attempt + 1))
+                    time.sleep(1.0)
                     continue
                 return pd.DataFrame()
             return df
         except Exception as exc:
             last_exc = exc
             if attempt < retries:
-                time.sleep(1.5 * (attempt + 1))
+                time.sleep(1.0)
                 continue
-            log.warning("yfinance failed for %s: %s", ticker, exc)
             return pd.DataFrame()
     return pd.DataFrame()
 
@@ -278,6 +291,30 @@ def fetch_with_fallback(base_ticker: str, period: str, interval: str) -> tuple[p
         if not df.empty:
             return df, suffix
     return pd.DataFrame(), ""
+
+
+def fetch_all(tickers: list[str], period: str, interval: str,
+              max_workers: int = 8) -> dict[str, tuple[pd.DataFrame, str]]:
+    """
+    Fetch data for many tickers concurrently. Returns {ticker: (df, suffix)}.
+    Skips tickers that fail or return no data.
+    """
+    results: dict[str, tuple[pd.DataFrame, str]] = {}
+
+    def _one(ticker: str):
+        try:
+            return ticker, fetch_with_fallback(ticker, period, interval)
+        except Exception as exc:
+            log.warning("Concurrent fetch failed for %s: %s", ticker, exc)
+            return ticker, (pd.DataFrame(), "")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_one, t) for t in tickers]
+        for fut in as_completed(futures):
+            ticker, (df, suffix) = fut.result()
+            if not df.empty:
+                results[ticker] = (df, suffix)
+    return results
 
 
 def last_close(df: pd.DataFrame) -> float:
@@ -403,18 +440,25 @@ def vwap_confirm(df: pd.DataFrame) -> bool:
     return bool(close.iloc[-1] > vwap.iloc[-1])
 
 
-def get_multi_timeframe_bias(ticker: str) -> tuple[float, str]:
-    """Return (bias_score, bias_text) from weekly + daily trend."""
+def get_multi_timeframe_bias(ticker: str = "", df_w: pd.DataFrame | None = None,
+                             df_d: pd.DataFrame | None = None) -> tuple[float, str]:
+    """
+    Return (bias_score, bias_text) from weekly + daily trend.
+    Pass pre-fetched dataframes to avoid re-downloading; if not provided,
+    they are fetched once per ticker.
+    """
     try:
-        df_w, _ = fetch_with_fallback(ticker, "1y", "1wk")
-        if df_w.empty or len(df_w) < 10:
+        if df_w is None or df_w.empty:
+            df_w, _ = fetch_with_fallback(ticker, "1y", "1wk")
+        if df_w is None or df_w.empty or len(df_w) < 10:
             return 0.0, "Neutral"
         close_w = _squeeze(df_w["Close"])
         ema20_w = float(ema(close_w, 20).iloc[-1]) if len(close_w) >= 20 else close_w.iloc[-1]
         weekly_bullish = float(close_w.iloc[-1]) > ema20_w
 
-        df_d, _ = fetch_with_fallback(ticker, "60d", "1d")
-        if df_d.empty or len(df_d) < 10:
+        if df_d is None or df_d.empty:
+            df_d, _ = fetch_with_fallback(ticker, "60d", "1d")
+        if df_d is None or df_d.empty or len(df_d) < 10:
             return 0.0, "Neutral"
         close_d = _squeeze(df_d["Close"])
         ema20_d = float(ema(close_d, 20).iloc[-1]) if len(close_d) >= 20 else close_d.iloc[-1]
@@ -439,10 +483,14 @@ def get_multi_timeframe_bias(ticker: str) -> tuple[float, str]:
 SIGNALS = ("STRONG_BUY", "BUY", "WATCH", "SELL", "STRONG_SELL")
 
 
-def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
+def generate_signal(df: pd.DataFrame, ticker: str = "",
+                    bias: tuple[float, str] | None = None) -> dict:
     """
     Confluence scoring based on RSI, MACD, EMA trend, volume, momentum,
     Bollinger Bands, VWAP, and multi-timeframe bias.
+
+    `bias` is an optional pre-computed (bias_score, bias_text) from
+    get_multi_timeframe_bias(). When omitted it is fetched once per ticker.
     """
     close = _squeeze(df["Close"])
     last_price = float(close.iloc[-1])
@@ -466,7 +514,8 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
 
     vwap_bull = vwap_confirm(df)
 
-    bias_score, bias_text = get_multi_timeframe_bias(ticker) if ticker else (0.0, "Neutral")
+    bias_score, bias_text = bias if bias is not None else (
+        get_multi_timeframe_bias(ticker) if ticker else (0.0, "Neutral"))
 
     score = 0  # -4 to +4
     if rsi < RSI_OVERSOLD:
@@ -634,8 +683,10 @@ def check_prediction_outcome(record: dict, today_intra: pd.DataFrame) -> dict:
 
 def evaluate_open_predictions() -> tuple[list[dict], int, int, int]:
     """
-    Evaluate all predictions that still have outcome OPEN (from previous days)
-    against today's intraday data. Returns (updated_records, wins, losses, open).
+    Evaluate all predictions that still have outcome OPEN against the intraday
+    bars of the day they were made. Returns (updated_records, wins, losses, open).
+    Each prediction is checked against its own record date so a missed post-market
+    run doesn't evaluate yesterday's picks against today's bars.
     """
     records = load_predictions()
     open_records = [r for r in records if r.get("outcome") in (None, "OPEN")]
@@ -646,26 +697,35 @@ def evaluate_open_predictions() -> tuple[list[dict], int, int, int]:
     updated = []
     all_records = load_predictions()  # full copy to rewrite with outcomes
 
-    # Group by ticker so we download each ticker's intraday data once.
-    by_ticker: dict[str, list[dict]] = {}
+    # Group open records by the date they were made.
+    by_date: dict[str, list[dict]] = {}
     for r in open_records:
-        by_ticker.setdefault(r["ticker"], []).append(r)
+        by_date.setdefault(r.get("date", ""), []).append(r)
 
-    for ticker, recs in by_ticker.items():
-        try:
-            df_intra, _ = fetch_with_fallback(ticker, "1d", "5m")
-            if df_intra.empty:
-                for r in recs:
-                    r["outcome"] = "OPEN"
-                    still_open += 1
-                    updated.append(r)
+    # For each distinct date, fetch that day's 5m intraday data once per ticker.
+    intraday_by_date: dict[str, dict[str, pd.DataFrame]] = {}
+    for rec_date, recs in by_date.items():
+        tickers = list({r["ticker"] for r in recs})
+        fetched = fetch_all(tickers, "5d", "5m")
+        per_ticker: dict[str, pd.DataFrame] = {}
+        target = pd.Timestamp(rec_date)
+        for ticker, (df, _suffix) in fetched.items():
+            if df.empty:
                 continue
-            today = pd.Timestamp(ist_today())
-            if df_intra.index.tz is None:
-                tod = df_intra[df_intra.index.tz_localize("UTC").tz_convert(IST).normalize() == today]
+            if df.index.tz is None:
+                tod = df[df.index.tz_localize("UTC").tz_convert(IST).normalize() == target]
             else:
-                tod = df_intra[df_intra.index.tz_convert(IST).normalize() == today]
-            for r in recs:
+                tod = df[df.index.tz_convert(IST).normalize() == target]
+            if not tod.empty:
+                per_ticker[ticker] = tod
+        intraday_by_date[rec_date] = per_ticker
+
+    for rec_date, recs in by_date.items():
+        tod_map = intraday_by_date.get(rec_date, {})
+        for r in recs:
+            ticker = r["ticker"]
+            tod = tod_map.get(ticker, pd.DataFrame())
+            try:
                 r = check_prediction_outcome(r, tod)
                 if r["outcome"] == "WIN":
                     wins += 1
@@ -674,15 +734,13 @@ def evaluate_open_predictions() -> tuple[list[dict], int, int, int]:
                 else:
                     still_open += 1
                 updated.append(r)
-        except Exception as exc:
-            log.warning("Outcome check failed for %s: %s", ticker, exc)
-            for r in recs:
+            except Exception as exc:
+                log.warning("Outcome check failed for %s (%s): %s", ticker, rec_date, exc)
                 r["outcome"] = "OPEN"
                 still_open += 1
                 updated.append(r)
 
     # Persist resolved outcomes back to the log so they survive across runs.
-    # Match updated records back to the full record list by (ticker, date).
     try:
         updated_key = {(r["ticker"], r.get("date", "")): r for r in updated}
         for i, r in enumerate(all_records):
@@ -756,14 +814,30 @@ def build_pre_market_report() -> str:
     sell_picks = []
     skipped = 0
 
+    # Fetch daily data for all tickers concurrently (much faster than sequential).
+    fetched = fetch_all(list(WATCHLIST.keys()), "60d", "1d")
+
+    # Pre-fetch weekly data concurrently so multi-timeframe bias doesn't
+    # re-download inside every generate_signal() call.
+    weekly_fetched = fetch_all(list(WATCHLIST.keys()), "1y", "1wk")
+
     for ticker, name in WATCHLIST.items():
         try:
-            df, source = fetch_with_fallback(ticker, "60d", "1d")
-            if df.empty or len(df) < 25:
+            result = fetched.get(ticker)
+            if result is None:
+                skipped += 1
+                log.warning("Skipping %s — no data", ticker)
+                continue
+            df, source = result
+            if len(df) < 25:
                 skipped += 1
                 log.warning("Skipping %s — insufficient data (source: %s)", ticker, source)
                 continue
-            info = generate_signal(df, ticker)
+
+            # Compute bias from pre-fetched weekly + daily data (no extra downloads).
+            wdf, _ = weekly_fetched.get(ticker, (pd.DataFrame(), ""))
+            bias = get_multi_timeframe_bias(ticker, df_w=wdf, df_d=df)
+            info = generate_signal(df, ticker, bias=bias)
             if info["signal"] in ("STRONG_BUY", "BUY") and info["confidence"] >= MIN_CONFIDENCE_FOR_PICK:
                 buy_picks.append((name, info))
             elif info["signal"] in ("STRONG_SELL", "SELL") and info["confidence"] >= MIN_CONFIDENCE_FOR_PICK:
@@ -848,31 +922,42 @@ def build_intraday_report() -> str:
     sell_picks = []
     stock_results = []
 
+    # Fetch daily data (for signals) and 5m data (for live price) concurrently.
+    daily_data = fetch_all(list(WATCHLIST.keys()), "60d", "1d")
+    intra_data = fetch_all(list(WATCHLIST.keys()), "5d", "5m")
+
+    # Pre-fetch weekly data concurrently so multi-timeframe bias doesn't
+    # re-download inside every generate_signal() call.
+    weekly_data = fetch_all(list(WATCHLIST.keys()), "1y", "1wk")
+
+    today = pd.Timestamp(ist_today())
     for ticker, name in WATCHLIST.items():
         try:
-            # Daily data for a reliable signal (same basis as pre-market).
-            df_daily, _ = fetch_with_fallback(ticker, "60d", "1d")
-            if df_daily.empty or len(df_daily) < 25:
+            result = daily_data.get(ticker)
+            if result is None:
                 continue
-            info = generate_signal(df_daily, ticker)
+            df_daily, _ = result
+            if len(df_daily) < 25:
+                continue
+
+            # Compute bias from pre-fetched weekly + daily data (no extra downloads).
+            wdf, _ = weekly_data.get(ticker, (pd.DataFrame(), ""))
+            bias = get_multi_timeframe_bias(ticker, df_w=wdf, df_d=df_daily)
+            info = generate_signal(df_daily, ticker, bias=bias)
 
             # 5m data only for current price / today's change display.
             close_price = info["last_price"]
             change_pct = 0.0
-            try:
-                df_intra, _ = fetch_with_fallback(ticker, "5d", "5m")
-                if not df_intra.empty:
-                    today = pd.Timestamp(ist_today())
-                    if df_intra.index.tz is None:
-                        tod = df_intra[df_intra.index.tz_localize("UTC").tz_convert(IST).normalize() == today]
-                    else:
-                        tod = df_intra[df_intra.index.tz_convert(IST).normalize() == today]
-                    if not tod.empty and len(tod) >= 2:
-                        close_price = float(_squeeze(tod["Close"]).iloc[-1])
-                        open_price = float(_squeeze(tod["Open"]).iloc[0])
-                        change_pct = (close_price - open_price) / open_price * 100 if open_price else 0.0
-            except Exception as exc:
-                log.warning("Intraday price fetch failed for %s: %s", ticker, exc)
+            df_intra, _ = intra_data.get(ticker, (pd.DataFrame(), ""))
+            if not df_intra.empty:
+                if df_intra.index.tz is None:
+                    tod = df_intra[df_intra.index.tz_localize("UTC").tz_convert(IST).normalize() == today]
+                else:
+                    tod = df_intra[df_intra.index.tz_convert(IST).normalize() == today]
+                if not tod.empty and len(tod) >= 2:
+                    close_price = float(_squeeze(tod["Close"]).iloc[-1])
+                    open_price = float(_squeeze(tod["Open"]).iloc[0])
+                    change_pct = (close_price - open_price) / open_price * 100 if open_price else 0.0
 
             stock_results.append({
                 "name": name,
@@ -982,14 +1067,16 @@ def build_post_market_report() -> str:
     sensex_level, sensex_pct = get_sensex_level()
 
     stock_results = []
+    intra_data = fetch_all(list(WATCHLIST.keys()), "5d", "5m")
+
+    today = pd.Timestamp(ist_today())
     for ticker, name in WATCHLIST.items():
         try:
-            df_intra, src = fetch_with_fallback(ticker, "5d", "5m")
+            df_intra, src = intra_data.get(ticker, (pd.DataFrame(), ""))
             if df_intra.empty:
                 log.warning("Skipping %s post-market (no data, src=%s)", ticker, src)
                 continue
 
-            today = pd.Timestamp(ist_today())
             if df_intra.index.tz is None:
                 today_intra = df_intra[df_intra.index.tz_localize("UTC").tz_convert(IST).normalize() == today]
             else:
