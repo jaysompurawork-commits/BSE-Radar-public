@@ -798,6 +798,18 @@ def signal_emoji(signal: str) -> str:
     }.get(signal, "⚪")
 
 
+def signal_label(signal: str) -> str:
+    """Return a bold, visually dominant BUY/SELL label.
+
+    Telegram's HTML mode doesn't support custom text colours, so BUY picks are
+    framed with green circle emoji and SELL picks with red circle emoji, plus
+    bold text — making them stand out as clearly as colour would.
+    """
+    emoji = signal_emoji(signal)
+    label = f"{emoji} <b>{signal.replace('_', ' ')}</b> {emoji}"
+    return label
+
+
 def fmt_money(val: float) -> str:
     return f"₹{val:,.2f}"
 
@@ -880,7 +892,7 @@ def build_pre_market_report() -> str:
         for i, (name, info) in enumerate(buy_picks[:5], 1):
             lines.append(
                 f"{i}. <b>{name}</b> | {fmt_money(info['last_price'])} | "
-                f"{info['signal']} | Conf {info['confidence']}% | "
+                f"{signal_label(info['signal'])} | Conf {info['confidence']}% | "
                 f"🎯 {fmt_money(info['target'])} | SL {fmt_money(info['stop_loss'])}"
             )
         lines.append("")
@@ -891,7 +903,7 @@ def build_pre_market_report() -> str:
         for i, (name, info) in enumerate(sell_picks[:4], 1):
             lines.append(
                 f"{i}. <b>{name}</b> | {fmt_money(info['last_price'])} | "
-                f"{info['signal']} | Conf {info['confidence']}% | "
+                f"{signal_label(info['signal'])} | Conf {info['confidence']}% | "
                 f"SL {fmt_money(info['stop_loss'])}"
             )
         lines.append("")
@@ -1010,7 +1022,7 @@ def build_intraday_report() -> str:
         for i, (name, info) in enumerate(buy_picks[:5], 1):
             lines.append(
                 f"{i}. <b>{name}</b> | {fmt_money(info['last_price'])} | "
-                f"{info['signal']} | Conf {info['confidence']}% | "
+                f"{signal_label(info['signal'])} | Conf {info['confidence']}% | "
                 f"🎯 {fmt_money(info['target'])} | SL {fmt_money(info['stop_loss'])}"
             )
         lines.append("")
@@ -1021,7 +1033,7 @@ def build_intraday_report() -> str:
         for i, (name, info) in enumerate(sell_picks[:4], 1):
             lines.append(
                 f"{i}. <b>{name}</b> | {fmt_money(info['last_price'])} | "
-                f"{info['signal']} | Conf {info['confidence']}% | "
+                f"{signal_label(info['signal'])} | Conf {info['confidence']}% | "
                 f"SL {fmt_money(info['stop_loss'])}"
             )
         lines.append("")
@@ -1169,7 +1181,7 @@ def build_post_market_report() -> str:
         total_resolved = wins + losses
         acc = (wins / total_resolved * 100) if total_resolved > 0 else 0.0
         lines.append(
-            f"✅ Wins: {wins}   ❌ Losses: {losses}   ⏳ Open: {still_open}"
+            f"🟢 <b>Wins: {wins}</b>   🔴 <b>Losses: {losses}</b>   ⏳ Open: {still_open}"
         )
         lines.append(f"🎯 Accuracy: {acc:.0f}% ({wins}/{total_resolved})")
 
@@ -1190,8 +1202,9 @@ def build_post_market_report() -> str:
             lines.append("━━━━━━━━━━━━")
             for r in resolved[:8]:
                 emoji = "✅" if r["outcome"] == "WIN" else "❌"
+                sig = signal_label(r["signal"])
                 lines.append(
-                    f"{emoji} <b>{r['name']}</b> | {r['signal']} | "
+                    f"{emoji} <b>{r['name']}</b> | {sig} | "
                     f"Target ₹{r.get('target', 0):,.2f} / SL ₹{r.get('stop_loss', 0):,.2f} | "
                     f"Hit ₹{r.get('outcome_price', 0):,.2f}"
                 )
