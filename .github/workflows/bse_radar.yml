@@ -4,6 +4,8 @@ on:
   schedule:
     # Pre-market: 9:00 AM IST = 3:30 AM UTC — weekdays only
     - cron: '30 3 * * 1-5'
+    # Intraday updates: every 10 min during market hours (9:30 AM–3:00 PM IST = 4:00–9:30 AM UTC) — weekdays only
+    - cron: '*/10 4-9 * * 1-5'
     # Post-market: 4:00 PM IST = 10:30 AM UTC — weekdays only
     - cron: '30 10 * * 1-5'
 
@@ -17,6 +19,7 @@ on:
         type: choice
         options:
           - pre
+          - intraday
           - post
 
 jobs:
@@ -45,6 +48,37 @@ jobs:
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_TYPE: pre
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python bse_radar_bot.py
+
+  intraday:
+    name: Intraday Update (every 30 min during market hours)
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '*/30 4-9 * * 1-5') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'intraday')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install yfinance pandas numpy requests
+
+      - name: Run intraday report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REPORT_TYPE: intraday
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: python bse_radar_bot.py
 
   post-market:
@@ -72,4 +106,6 @@ jobs:
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_TYPE: post
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: python bse_radar_bot.py
