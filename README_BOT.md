@@ -27,7 +27,7 @@ Or use `TELEGRAM_CHAT_IDS` for multiple chat IDs separated by commas.
 | Report | Time (IST) | Days |
 |---|---|---|
 | Pre-Market (BUY/SELL picks) | **9:00 AM** | Mon–Fri |
-| Intraday updates | Every **30 min**, 9:30 AM–3:00 PM | Mon–Fri |
+| Intraday updates | Every **10 min**, 9:30 AM–3:00 PM | Mon–Fri |
 | Post-Market (gainers/losers + accuracy) | **4:00 PM** | Mon–Fri |
 
 ## 3. Run Manually

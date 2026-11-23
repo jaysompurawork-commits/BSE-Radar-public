@@ -771,7 +771,7 @@ def build_pre_market_report() -> str:
 
 
 def build_intraday_report() -> str:
-    """Intraday update: live BUY/SELL signals with targets/SL during market hours."""
+    """Intraday update: BUY/SELL picks from reliable daily signals + live prices."""
     today_str = ist_today().strftime("%d %b %Y")
     now = now_ist().strftime("%I:%M %p IST")
 
@@ -784,23 +784,29 @@ def build_intraday_report() -> str:
 
     for ticker, name in WATCHLIST.items():
         try:
-            # Use 5d of 5m data so indicators have enough history to be accurate
-            df_intra, src = fetch_with_fallback(ticker, "5d", "5m")
-            if df_intra.empty:
+            # Daily data for a reliable signal (same basis as pre-market).
+            df_daily, _ = fetch_with_fallback(ticker, "60d", "1d")
+            if df_daily.empty or len(df_daily) < 25:
                 continue
-            today = pd.Timestamp(ist_today())
-            if df_intra.index.tz is None:
-                tod = df_intra[df_intra.index.tz_localize("UTC").tz_convert(IST).normalize() == today]
-            else:
-                tod = df_intra[df_intra.index.tz_convert(IST).normalize() == today]
-            if tod.empty or len(tod) < 20:
-                continue
+            info = generate_signal(df_daily, ticker)
 
-            # Generate a live signal from intraday data
-            info = generate_signal(tod, ticker)
-            close_price = float(_squeeze(tod["Close"]).iloc[-1])
-            open_price = float(_squeeze(tod["Open"]).iloc[0])
-            change_pct = (close_price - open_price) / open_price * 100 if open_price else 0.0
+            # 5m data only for current price / today's change display.
+            close_price = info["last_price"]
+            change_pct = 0.0
+            try:
+                df_intra, _ = fetch_with_fallback(ticker, "5d", "5m")
+                if not df_intra.empty:
+                    today = pd.Timestamp(ist_today())
+                    if df_intra.index.tz is None:
+                        tod = df_intra[df_intra.index.tz_localize("UTC").tz_convert(IST).normalize() == today]
+                    else:
+                        tod = df_intra[df_intra.index.tz_convert(IST).normalize() == today]
+                    if not tod.empty and len(tod) >= 2:
+                        close_price = float(_squeeze(tod["Close"]).iloc[-1])
+                        open_price = float(_squeeze(tod["Open"]).iloc[0])
+                        change_pct = (close_price - open_price) / open_price * 100 if open_price else 0.0
+            except Exception as exc:
+                log.warning("Intraday price fetch failed for %s: %s", ticker, exc)
 
             stock_results.append({
                 "name": name,
@@ -809,10 +815,10 @@ def build_intraday_report() -> str:
                 "change_pct": change_pct,
             })
 
-            # Lower confidence threshold for intraday so we actually get picks
-            if info["signal"] in ("STRONG_BUY", "BUY") and info["confidence"] >= 45:
+            # Same thresholds as pre-market so picks are consistent and accurate.
+            if info["signal"] in ("STRONG_BUY", "BUY") and info["confidence"] >= MIN_CONFIDENCE_FOR_PICK:
                 buy_picks.append((name, info))
-            elif info["signal"] in ("STRONG_SELL", "SELL") and info["confidence"] >= 45:
+            elif info["signal"] in ("STRONG_SELL", "SELL") and info["confidence"] >= MIN_CONFIDENCE_FOR_PICK:
                 sell_picks.append((name, info))
         except Exception as exc:
             log.warning("Intraday signal failed for %s: %s", ticker, exc)
@@ -821,7 +827,7 @@ def build_intraday_report() -> str:
     buy_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
     sell_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
 
-    # Log intraday predictions for accuracy tracking
+    # Log intraday predictions for accuracy tracking.
     for name, info in buy_picks + sell_picks:
         ticker_key = next((t for t, n in WATCHLIST.items() if n == name), "")
         log_prediction(ticker_key, name, info["signal"], info["confidence"],
@@ -869,7 +875,7 @@ def build_intraday_report() -> str:
         lines.append("")
 
     if not buy_picks and not sell_picks:
-        lines.append("⚪ No strong intraday signals yet — market neutral.")
+        lines.append("⚪ No strong signals today — market neutral.")
         lines.append("")
 
     if top_gainers:
