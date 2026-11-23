@@ -1,6 +1,6 @@
 """
 BSE Radar Bot — Production v3.0
-Sends pre-market (9:00 AM IST), intraday updates (every 30 min during market
+Sends pre-market (9:00 AM IST), intraday updates (every 10 min during market
 hours), and post-market (4:00 PM IST) reports to Telegram.
 Uses REAL BSE/NSE data via yfinance (.BO primary, .NS fallback). Runs on GitHub Actions.
 
@@ -763,8 +763,8 @@ def build_pre_market_report() -> str:
     lines += [
         f"📊 Mood: {'Bullish 📈' if len(buy_picks) >= len(sell_picks) else 'Bearish 📉' if sell_picks else 'Mixed ↔️'}",
         "",
-        "📌 Not SEBI-registered advice. Do your own research.",
-        "🤖 BSE Radar Bot | Pre-market 9:00 AM IST",
+        "Not SEBI-registered advice.",
+        "BSE Radar Bot | Pre-market",
     ]
 
     return "\n".join(lines)
@@ -784,7 +784,8 @@ def build_intraday_report() -> str:
 
     for ticker, name in WATCHLIST.items():
         try:
-            df_intra, src = fetch_with_fallback(ticker, "1d", "5m")
+            # Use 5d of 5m data so indicators have enough history to be accurate
+            df_intra, src = fetch_with_fallback(ticker, "5d", "5m")
             if df_intra.empty:
                 continue
             today = pd.Timestamp(ist_today())
@@ -792,7 +793,7 @@ def build_intraday_report() -> str:
                 tod = df_intra[df_intra.index.tz_localize("UTC").tz_convert(IST).normalize() == today]
             else:
                 tod = df_intra[df_intra.index.tz_convert(IST).normalize() == today]
-            if tod.empty or len(tod) < 2:
+            if tod.empty or len(tod) < 20:
                 continue
 
             # Generate a live signal from intraday data
@@ -808,9 +809,10 @@ def build_intraday_report() -> str:
                 "change_pct": change_pct,
             })
 
-            if info["signal"] in ("STRONG_BUY", "BUY") and info["confidence"] >= MIN_CONFIDENCE_FOR_PICK:
+            # Lower confidence threshold for intraday so we actually get picks
+            if info["signal"] in ("STRONG_BUY", "BUY") and info["confidence"] >= 45:
                 buy_picks.append((name, info))
-            elif info["signal"] in ("STRONG_SELL", "SELL") and info["confidence"] >= MIN_CONFIDENCE_FOR_PICK:
+            elif info["signal"] in ("STRONG_SELL", "SELL") and info["confidence"] >= 45:
                 sell_picks.append((name, info))
         except Exception as exc:
             log.warning("Intraday signal failed for %s: %s", ticker, exc)
@@ -891,8 +893,8 @@ def build_intraday_report() -> str:
         lines.append("")
 
     lines += [
-        "📌 Signals use live intraday data. Not SEBI-registered advice.",
-        "🤖 BSE Radar Bot | Intraday update",
+        "Not SEBI-registered advice.",
+        "BSE Radar Bot | Intraday update",
     ]
 
     return "\n".join(lines)
@@ -1029,8 +1031,8 @@ def build_post_market_report() -> str:
         lines.append("⏳ Could not evaluate prediction outcomes today.")
     lines.append("")
     lines += [
-        "📌 Not SEBI-registered advice. Do your own research.",
-        "🤖 BSE Radar Bot | Post-market 4:00 PM IST",
+        "Not SEBI-registered advice.",
+        "BSE Radar Bot | Post-market",
     ]
 
     return "\n".join(lines)
@@ -1066,10 +1068,18 @@ def main() -> None:
         sys.exit(1)
 
     chat_ids = []
+    seen = set()
     if chat_ids_raw:
-        chat_ids.extend([c.strip() for c in chat_ids_raw.split(",") if c.strip()])
+        for c in chat_ids_raw.split(","):
+            c = c.strip()
+            if c and c not in seen:
+                chat_ids.append(c)
+                seen.add(c)
     if chat_id_single:
-        chat_ids.append(chat_id_single.strip())
+        chat_id_single = chat_id_single.strip()
+        if chat_id_single and chat_id_single not in seen:
+            chat_ids.append(chat_id_single)
+            seen.add(chat_id_single)
 
     if not chat_ids:
         log.error("TELEGRAM_CHAT_IDS (or TELEGRAM_CHAT_ID) must be set.")
