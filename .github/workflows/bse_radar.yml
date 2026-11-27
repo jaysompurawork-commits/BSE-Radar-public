@@ -2,17 +2,18 @@ name: BSE Radar Bot
 
 on:
   schedule:
-    # Pre-market: 9:00 AM IST = 3:30 AM UTC (weekdays)
-    - cron: '30 3 * * 1-5'
+    # Pre-market: 8:15 AM IST = 2:45 AM UTC (weekdays)
+    - cron: '45 2 * * 1-5'
     # Intraday: every 10 min, 9:30 AM–3:00 PM IST = 4:00–9:30 AM UTC (weekdays)
     - cron: '*/10 4-9 * * 1-5'
-    # Post-market: 3:45 PM IST = 10:15 AM UTC (gives 15 min after close for data to settle)
+    # Post-market: 3:45 PM IST = 10:15 AM UTC (weekdays)
     - cron: '15 10 * * 1-5'
 
+  # Manual trigger from GitHub Actions tab
   workflow_dispatch:
     inputs:
       report_type:
-        description: 'Report type'
+        description: 'Report type to send'
         required: true
         default: 'pre'
         type: choice
@@ -20,19 +21,13 @@ on:
           - pre
           - intraday
           - post
-      send_always:
-        description: 'Send even when there are no signals (test mode)'
-        required: false
-        default: 'false'
-        type: boolean
 
 jobs:
-  # ──────────────────────────────────────────────────────────────────────────
   pre-market:
-    name: Pre-Market (9:00 AM IST)
+    name: Pre-Market Brief (8:15 AM IST)
     runs-on: ubuntu-latest
     if: |
-      (github.event_name == 'schedule' && github.event.schedule == '30 3 * * 1-5') ||
+      (github.event_name == 'schedule' && github.event.schedule == '45 2 * * 1-5') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'pre')
 
     steps:
@@ -45,21 +40,19 @@ jobs:
       - name: Install dependencies
         run: pip install yfinance pandas numpy requests
 
-      - name: Send pre-market report
+      - name: Send pre-market brief
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_TYPE: pre
-          SEND_ALWAYS: ${{ github.event.inputs.send_always }}
         run: python bse-radar-bot/bse_radar_bot.py
 
-  # ──────────────────────────────────────────────────────────────────────────
   intraday:
-    name: Intraday Update (every 30 min)
+    name: Intraday Update (every 10 min)
     runs-on: ubuntu-latest
     if: |
-      (github.event_name == 'schedule' && github.event.schedule == '0,30 4-9 * * 1-5') ||
+      (github.event_name == 'schedule' && github.event.schedule == '*/10 4-9 * * 1-5') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'intraday')
 
     steps:
@@ -78,12 +71,10 @@ jobs:
           TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_TYPE: intraday
-          SEND_ALWAYS: ${{ github.event.inputs.send_always }}
         run: python bse-radar-bot/bse_radar_bot.py
 
-  # ──────────────────────────────────────────────────────────────────────────
   post-market:
-    name: Post-Market (3:45 PM IST)
+    name: Post-Market Report (3:45 PM IST)
     runs-on: ubuntu-latest
     if: |
       (github.event_name == 'schedule' && github.event.schedule == '15 10 * * 1-5') ||
@@ -105,5 +96,4 @@ jobs:
           TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_TYPE: post
-          SEND_ALWAYS: ${{ github.event.inputs.send_always }}
         run: python bse-radar-bot/bse_radar_bot.py

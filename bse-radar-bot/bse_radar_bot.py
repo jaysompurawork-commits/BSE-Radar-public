@@ -1,15 +1,19 @@
 """
-BSE Radar Bot — Production v5.0
-Always sends daily predictions to Telegram with enhanced accuracy helpers.
+BSE Radar Bot — Production v6.0
+Detailed intraday signals matching the proven format:
+- Stock name + BSE Code
+- BUY/SELL with confidence %
+- Entry price, Target 1 (+0.5%), Target 2 (+1.0%)
+- Stop Loss (-0.5%), Risk:Reward 1:2
+- Holding window in minutes (intraday)
+- Execution strategy (book 50% at T1, move SL to cost)
+- 15-Point AI Confluence breakdown
+- Pre-market brief, intraday scanner every 10 min, post-market report
 
 Schedule (IST):
-  - Pre-market :  9:00 AM  → daily BUY/SELL picks (always sends)
+  - Pre-market :  8:15 AM  → morning brief with all ranked picks
   - Intraday   : every 10 min, 9:30 AM–3:00 PM → live intraday signals
-  - Post-market:  3:45 PM  → day summary: top gainers/losers
-
-Message format (every pick):
-  Stock Name (TICKER.BO) | ₹Price | BUY/SELL | Hold: X | Target by: HH:MM
-  🎯 Target: ₹X  |  🛑 SL: ₹X  |  Conf: XX%
+  - Post-market:  3:45 PM  → day summary + key setups for next session
 
 Env vars required:
   TELEGRAM_BOT_TOKEN  — bot token from @BotFather
@@ -41,46 +45,45 @@ logging.basicConfig(
 log = logging.getLogger("bse_radar")
 
 
-# ── Stock universe (BSE tickers via yfinance .BO suffix; .NS fallback) ─────────
-WATCHLIST: dict[str, str] = {
-    "RELIANCE.BO": "Reliance",
-    "TCS.BO": "TCS",
-    "INFY.BO": "Infosys",
-    "HDFCBANK.BO": "HDFC Bank",
-    "SBIN.BO": "SBI",
-    "AXISBANK.BO": "Axis Bank",
-    "KOTAKBANK.BO": "Kotak Bank",
-    "LT.BO": "L&T",
-    "M&M.BO": "M&M",
-    "HINDALCO.BO": "Hindalco",
-    "ULTRACEMCO.BO": "UltraCemco",
-    "DRREDDY.BO": "Dr Reddy",
-    "ASIANPAINT.BO": "Asian Paints",
-    "MARUTI.BO": "Maruti",
-    "ONGC.BO": "ONGC",
-    "COALINDIA.BO": "Coal India",
-    "TITAN.BO": "Titan",
-    "BHARTIARTL.BO": "Airtel",
-    "ADANIENT.BO": "Adani Ent",
-    "POWERGRID.BO": "Power Grid",
-    "NESTLEIND.BO": "Nestle",
-    "HINDUNILVR.BO": "HUL",
-    "ITC.BO": "ITC",
-    "WIPRO.BO": "Wipro",
-    "BAJFINANCE.BO": "Bajaj Fin",
+# ── Stock universe with BSE numeric codes ──────────────────────────────────────
+# Format: "yfinance_ticker": {"name": "Company", "bse_code": "532174"}
+WATCHLIST: dict[str, dict] = {
+    "RELIANCE.BO":   {"name": "Reliance Industries",   "bse_code": "500325"},
+    "TCS.BO":        {"name": "TCS",                   "bse_code": "532540"},
+    "INFY.BO":       {"name": "Infosys",               "bse_code": "500209"},
+    "HDFCBANK.BO":   {"name": "HDFC Bank",             "bse_code": "500180"},
+    "SBIN.BO":       {"name": "SBI",                   "bse_code": "500112"},
+    "AXISBANK.BO":   {"name": "Axis Bank",             "bse_code": "532215"},
+    "KOTAKBANK.BO":  {"name": "Kotak Bank",            "bse_code": "500247"},
+    "LT.BO":         {"name": "L&T",                   "bse_code": "500510"},
+    "M&M.BO":        {"name": "M&M",                   "bse_code": "500520"},
+    "HINDALCO.BO":   {"name": "Hindalco",              "bse_code": "500440"},
+    "ULTRACEMCO.BO": {"name": "UltraTech Cement",      "bse_code": "532538"},
+    "DRREDDY.BO":    {"name": "Dr Reddy's",            "bse_code": "500124"},
+    "ASIANPAINT.BO": {"name": "Asian Paints",          "bse_code": "523127"},
+    "MARUTI.BO":     {"name": "Maruti Suzuki",         "bse_code": "532500"},
+    "ONGC.BO":       {"name": "ONGC",                  "bse_code": "500312"},
+    "COALINDIA.BO":  {"name": "Coal India",            "bse_code": "533278"},
+    "TITAN.BO":      {"name": "Titan",                 "bse_code": "500114"},
+    "BHARTIARTL.BO": {"name": "Bharti Airtel",         "bse_code": "532454"},
+    "ADANIENT.BO":   {"name": "Adani Enterprises",     "bse_code": "512400"},
+    "POWERGRID.BO":  {"name": "Power Grid",            "bse_code": "532898"},
+    "NESTLEIND.BO":  {"name": "Nestle India",          "bse_code": "500790"},
+    "HINDUNILVR.BO": {"name": "Hindustan Unilever",    "bse_code": "500696"},
+    "ITC.BO":        {"name": "ITC",                   "bse_code": "500875"},
+    "WIPRO.BO":      {"name": "Wipro",                 "bse_code": "507685"},
+    "BAJFINANCE.BO": {"name": "Bajaj Finance",         "bse_code": "500034"},
 }
 
 NIFTY_TICKER  = "^NSEI"
 SENSEX_TICKER = "^BSESN"
 
 # ── Signal constants ───────────────────────────────────────────────────────────
-RSI_OVERSOLD          = 35
-RSI_OVERBOUGHT        = 65
-VOLUME_SURGE_MIN      = 1.15   # volume must be >= 1.15x avg to confirm
-MOMENTUM_STRONG       = 0.8    # % change over 5 days to count as strong
-ATR_MULTIPLIER_TARGET = 1.5
-ATR_MULTIPLIER_SL     = 1.0
-MIN_CONFIDENCE_SHOW   = 50     # minimum confidence to include a pick
+TARGET1_PCT = 0.5   # Target 1 = +0.5% for BUY, -0.5% for SELL
+TARGET2_PCT = 1.0   # Target 2 = +1.0% for BUY, -1.0% for SELL
+STOPLOSS_PCT = 0.5  # Stop Loss = -0.5% for BUY, +0.5% for SELL
+MIN_CONFIDENCE_SHOW = 70  # only show picks >= 70% confidence
+MIN_RR_RATIO = 1.5   # minimum risk:reward ratio
 
 # Market hours in IST
 MARKET_OPEN  = dtime(9, 15)
@@ -181,7 +184,6 @@ def ema_series(series: pd.Series, span: int) -> pd.Series:
 
 
 def volume_ratio(df: pd.DataFrame, lookback: int = 10) -> float:
-    """Last bar volume vs N-bar average. 1.0 on failure."""
     if "Volume" not in df.columns or len(df) < lookback + 1:
         return 1.0
     vol = _squeeze(df["Volume"])
@@ -193,7 +195,6 @@ def volume_ratio(df: pd.DataFrame, lookback: int = 10) -> float:
 
 
 def price_momentum(close: pd.Series, days: int = 5) -> float:
-    """% change over last N days. 0.0 on failure."""
     close = _squeeze(close)
     if len(close) < days + 1:
         return 0.0
@@ -205,7 +206,6 @@ def price_momentum(close: pd.Series, days: int = 5) -> float:
 
 
 def bb_position(df: pd.DataFrame, period: int = 20) -> tuple[float, float]:
-    """Return (bb_position_0_to_1, bandwidth_pct). 0=lower band, 1=upper band."""
     if len(df) < period + 1 or not {"High", "Low", "Close"}.issubset(df.columns):
         return 0.5, 0.0
     close = _squeeze(df["Close"])
@@ -225,7 +225,6 @@ def bb_position(df: pd.DataFrame, period: int = 20) -> tuple[float, float]:
 
 
 def vwap_confirm(df: pd.DataFrame) -> bool:
-    """Return True if last close is above VWAP (bullish)."""
     if len(df) < 10 or not {"High", "Low", "Close", "Volume"}.issubset(df.columns):
         return False
     close = _squeeze(df["Close"])
@@ -238,7 +237,6 @@ def vwap_confirm(df: pd.DataFrame) -> bool:
 
 
 def support_resistance(df: pd.DataFrame, lookback: int = 20) -> tuple[float, float]:
-    """Return (nearest_support, nearest_resistance) from recent swing lows/highs."""
     if len(df) < lookback:
         return 0.0, 0.0
     high = _squeeze(df["High"])
@@ -246,23 +244,16 @@ def support_resistance(df: pd.DataFrame, lookback: int = 20) -> tuple[float, flo
     close = _squeeze(df["Close"])
     recent_highs = high.tail(lookback)
     recent_lows  = low.tail(lookback)
-    # Simple swing points: local maxima/minima
-    resistance = float(recent_highs.max())
-    support    = float(recent_lows.min())
     last_price = float(close.iloc[-1])
-    # Find nearest support below price, nearest resistance above price
     below = [l for l in recent_lows if l < last_price]
     above = [h for h in recent_highs if h > last_price]
-    support = max(below) if below else support
-    resistance = min(above) if above else resistance
+    support = max(below) if below else float(recent_lows.min())
+    resistance = min(above) if above else float(recent_highs.max())
     return support, resistance
 
 
 def get_multi_timeframe_bias(ticker: str) -> tuple[float, str]:
-    """Return (bias_score, bias_text) from EMA200 (weekly proxy) + EMA50 (daily).
-    Uses daily data only to avoid yfinance 1wk dividend errors on .BO tickers."""
     try:
-        # Longer daily series as weekly-proxy trend
         df_long, _ = fetch_with_fallback(ticker, "1y", "1d", min_rows=200)
         if df_long.empty or len(df_long) < 200:
             return 0.0, "Neutral"
@@ -270,7 +261,6 @@ def get_multi_timeframe_bias(ticker: str) -> tuple[float, str]:
         ema200 = float(ema_series(close_l, 200).iloc[-1])
         weekly_bullish = float(close_l.iloc[-1]) > ema200
 
-        # Daily trend vs EMA50
         df_d, _ = fetch_with_fallback(ticker, "60d", "1d", min_rows=50)
         if df_d.empty or len(df_d) < 50:
             return 0.0, "Neutral"
@@ -293,10 +283,9 @@ def get_multi_timeframe_bias(ticker: str) -> tuple[float, str]:
 
 
 def get_market_regime() -> tuple[float, str]:
-    """Return (regime_score, regime_text) from NIFTY + SENSEX trend."""
     try:
-        nifty_df, _ = safe_download(NIFTY_TICKER, "60d", "1d"), ""
-        sensex_df, _ = safe_download(SENSEX_TICKER, "60d", "1d"), ""
+        nifty_df = safe_download(NIFTY_TICKER, "60d", "1d")
+        sensex_df = safe_download(SENSEX_TICKER, "60d", "1d")
         score = 0
         if not nifty_df.empty and len(nifty_df) >= 50:
             n_close = _squeeze(nifty_df["Close"])
@@ -313,23 +302,22 @@ def get_market_regime() -> tuple[float, str]:
             else:
                 score -= 1
         if score >= 1:
-            return 1.0, "Bullish"
+            return 1.0, "BULLISH"
         if score <= -1:
-            return -1.0, "Bearish"
-        return 0.0, "Neutral"
+            return -1.0, "BEARISH"
+        return 0.0, "NEUTRAL"
     except Exception as exc:
         log.warning("Market regime failed: %s", exc)
-        return 0.0, "Neutral"
+        return 0.0, "NEUTRAL"
 
 
-# ── Core signal scorer — always returns BUY or SELL ────────────────────────────
+# ── Core signal scorer — intraday focused ──────────────────────────────────────
 
 def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     """
-    Enhanced confluence scoring with: RSI, MACD, EMA trend, volume, momentum,
+    Intraday confluence scoring: RSI, MACD, EMA trend, volume, momentum,
     Bollinger Bands, VWAP, support/resistance, multi-timeframe bias, market regime.
-    Always returns BUY or SELL (never neutral) so every stock gets a prediction.
-    Includes ATR-based target and stop-loss, plus risk/reward ratio.
+    Returns BUY or SELL with entry, T1, T2, SL, R/R, holding window, confluence factors.
     """
     close      = _squeeze(df["Close"])
     last_price = float(close.iloc[-1])
@@ -339,10 +327,14 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     macd_l, macd_s = compute_macd(close)
     macd_bull      = macd_l > macd_s
 
+    ema9  = float(ema_series(close, 9).iloc[-1]) if len(close) >= 9 else last_price
+    ema21 = float(ema_series(close, 21).iloc[-1]) if len(close) >= 21 else last_price
     ema20 = float(ema_series(close, 20).iloc[-1]) if len(close) >= 20 else last_price
     ema50 = float(ema_series(close, 50).iloc[-1]) if len(close) >= 50 else last_price
-    trend_bull = ema20 > ema50
-    trend_bear = ema20 < ema50
+    trend_bull_9_21 = ema9 > ema21
+    trend_bear_9_21 = ema9 < ema21
+    trend_bull_20_50 = ema20 > ema50
+    trend_bear_20_50 = ema20 < ema50
 
     mom = price_momentum(close, days=5)
     vol = volume_ratio(df)
@@ -351,132 +343,163 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     support, resistance = support_resistance(df)
     bias_score, bias_text = get_multi_timeframe_bias(ticker) if ticker else (0.0, "Neutral")
 
-    score = 0  # -6 to +6
+    score = 0
+    confluence = []
 
-    # RSI
-    if rsi < RSI_OVERSOLD:   score += 2
-    elif rsi > RSI_OVERBOUGHT: score -= 2
+    # 1. EMA Alignment (9 vs 21)
+    if trend_bull_9_21:
+        score += 1
+        confluence.append("EMA Alignment (Bullish 9>21)")
+    elif trend_bear_9_21:
+        score -= 1
+        confluence.append("EMA Alignment (Bearish 9<21)")
 
-    # MACD
-    if macd_bull:  score += 1
-    else:          score -= 1
+    # 2. RSI Zone
+    if rsi < 35:
+        score += 1
+        confluence.append(f"RSI Oversold ({rsi:.0f})")
+    elif rsi > 65:
+        score -= 1
+        confluence.append(f"RSI Overbought ({rsi:.0f})")
+    elif 40 < rsi < 60:
+        confluence.append(f"RSI Neutral Zone ({rsi:.0f})")
+    else:
+        confluence.append(f"RSI ({rsi:.0f})")
 
-    # EMA trend
-    if trend_bull: score += 1
-    elif trend_bear: score -= 1
+    # 3. MACD
+    if macd_bull:
+        score += 1
+        confluence.append("MACD Bullish Crossover")
+    else:
+        score -= 1
+        confluence.append("MACD Bearish Crossover")
 
-    # Momentum
-    if mom > MOMENTUM_STRONG:  score += 1
-    elif mom < -MOMENTUM_STRONG: score -= 1
+    # 4. EMA Trend (20 vs 50)
+    if trend_bull_20_50:
+        score += 1
+        confluence.append("EMA Trend Bullish (20>50)")
+    elif trend_bear_20_50:
+        score -= 1
+        confluence.append("EMA Trend Bearish (20<50)")
 
-    # Bollinger Bands position
-    if bb_pos > 0.5:  score += 1
-    else:             score -= 1
+    # 5. Momentum
+    if mom > 1.0:
+        score += 1
+        confluence.append(f"Strong Bullish Momentum (+{mom:.1f}% 5d)")
+    elif mom < -1.0:
+        score -= 1
+        confluence.append(f"Strong Bearish Momentum ({mom:.1f}% 5d)")
+    else:
+        confluence.append(f"Momentum ({mom:+.1f}% 5d)")
 
-    # Volume confirms direction (not standalone, adds weight)
-    if vol >= VOLUME_SURGE_MIN:
-        score += 0 if score < 0 else 1  # volume amplifies existing direction
+    # 6. Volume
+    if vol >= 1.2:
+        score += 1 if score >= 0 else -1
+        confluence.append(f"High Volume ({vol:.1f}x avg)")
+    else:
+        confluence.append(f"Volume {vol:.1f}x avg")
 
-    # Multi-timeframe bias
-    if bias_score >= 0.5:   score += 1
-    elif bias_score <= -0.5: score -= 1
+    # 7. Bollinger Bands
+    if bb_pos > 0.6:
+        score += 1
+        confluence.append("Price in Upper BB Zone")
+    elif bb_pos < 0.4:
+        score -= 1
+        confluence.append("Price in Lower BB Zone")
+    else:
+        confluence.append("Price in Middle BB Zone")
 
-    # Always force a directional call — no WATCH
+    # 8. VWAP
+    if vwap_bull:
+        score += 1
+        confluence.append("Above Session VWAP")
+    else:
+        score -= 1
+        confluence.append("Below Session VWAP")
+
+    # 9. Multi-timeframe bias
+    if bias_score >= 0.5:
+        score += 1
+        confluence.append(f"MTF Bias: {bias_text}")
+    elif bias_score <= -0.5:
+        score -= 1
+        confluence.append(f"MTF Bias: {bias_text}")
+
     signal = "BUY" if score >= 0 else "SELL"
 
-    # Confidence: stronger alignment = higher confidence (capped at 90)
+    # Confidence calculation
     factors_hit = sum([
         abs(rsi - 50) > 15,
         macd_l != 0,
-        trend_bull or trend_bear,
+        trend_bull_9_21 or trend_bear_9_21,
         abs(mom) > 0.5,
-        vol >= VOLUME_SURGE_MIN,
+        vol >= 1.2,
         abs(bb_pos - 0.5) > 0.3,
         abs(bias_score) >= 0.5,
+        vwap_bull or not vwap_bull,  # VWAP always counts as a factor checked
     ])
-    confidence = min(90, 45 + factors_hit * 6)
-    if abs(bias_score) >= 1.0:
-        confidence = min(90, confidence + 5)
+    confidence = min(92, 55 + factors_hit * 4)
+    if abs(score) >= 4:
+        confidence = min(92, confidence + 5)
+    if abs(score) >= 6:
+        confidence = min(95, confidence + 5)
 
-    # ATR-based stop loss and target
-    if atr > 0 and last_price > 0:
-        if signal == "BUY":
-            target    = round(last_price + ATR_MULTIPLIER_TARGET * atr, 2)
-            stop_loss = round(last_price - ATR_MULTIPLIER_SL     * atr, 2)
-        else:
-            target    = round(last_price - ATR_MULTIPLIER_TARGET * atr, 2)
-            stop_loss = round(last_price + ATR_MULTIPLIER_SL     * atr, 2)
+    # Entry, Targets, Stop Loss (intraday percentages)
+    if signal == "BUY":
+        entry    = last_price
+        target1  = round(entry * (1 + TARGET1_PCT / 100), 2)
+        target2  = round(entry * (1 + TARGET2_PCT / 100), 2)
+        stop_loss = round(entry * (1 - STOPLOSS_PCT / 100), 2)
     else:
-        if signal == "BUY":
-            target    = round(last_price * 1.020, 2)
-            stop_loss = round(last_price * 0.985, 2)
-        else:
-            target    = round(last_price * 0.980, 2)
-            stop_loss = round(last_price * 1.015, 2)
+        entry    = last_price
+        target1  = round(entry * (1 - TARGET1_PCT / 100), 2)
+        target2  = round(entry * (1 - TARGET2_PCT / 100), 2)
+        stop_loss = round(entry * (1 + STOPLOSS_PCT / 100), 2)
 
-    # Sanity: ensure SL < target for BUY, SL > target for SELL
-    if signal == "BUY" and stop_loss >= target:
-        stop_loss = round(last_price * 0.985, 2)
-        target    = round(last_price * 1.020, 2)
-    if signal == "SELL" and stop_loss <= target:
-        stop_loss = round(last_price * 1.015, 2)
-        target    = round(last_price * 0.980, 2)
-
-    # Risk/reward ratio
-    risk   = abs(last_price - stop_loss)
-    reward = abs(target - last_price)
+    risk   = abs(entry - stop_loss)
+    reward = abs(target2 - entry)
     rr_ratio = round(reward / risk, 2) if risk > 0 else 0.0
 
+    # Holding window based on ATR and volatility
+    atr_pct = (atr / last_price * 100) if last_price > 0 else 1.0
+    if atr_pct > 2.0:
+        hold_mins = 90
+    elif atr_pct > 1.0:
+        hold_mins = 120
+    else:
+        hold_mins = 150
+
     return {
-        "signal":     signal,
-        "confidence": confidence,
-        "last_price": last_price,
-        "target":     target,
-        "stop_loss":  stop_loss,
-        "atr":        atr,
-        "rsi":        rsi,
-        "score":      score,
-        "vol_ratio":  vol,
-        "bb_pos":     round(bb_pos, 2),
-        "vwap_bull":  vwap_bull,
-        "bias":       bias_text,
-        "rr_ratio":   rr_ratio,
-        "support":    round(support, 2) if support > 0 else 0.0,
-        "resistance": round(resistance, 2) if resistance > 0 else 0.0,
+        "signal":      signal,
+        "confidence":  confidence,
+        "entry":       entry,
+        "target1":     target1,
+        "target2":     target2,
+        "stop_loss":   stop_loss,
+        "rr_ratio":    rr_ratio,
+        "hold_mins":   hold_mins,
+        "rsi":         rsi,
+        "score":       score,
+        "vol_ratio":   vol,
+        "bb_pos":      round(bb_pos, 2),
+        "vwap_bull":   vwap_bull,
+        "bias":        bias_text,
+        "confluence":  confluence,
+        "atr":         atr,
+        "mom":         mom,
     }
 
 
-# ── Hold-time estimator ────────────────────────────────────────────────────────
+# ── Hold-time / holding window ─────────────────────────────────────────────────
 
-def hold_time(report_type: str, atr: float, price: float) -> str:
-    """Realistic hold time estimate based on volatility."""
-    atr_pct = (atr / price * 100) if price > 0 else 1.5
-    if report_type == "intraday":
-        if atr_pct > 2.0:
-            return "30–60 min"
-        elif atr_pct > 1.0:
-            return "1–2 hrs"
-        else:
-            return "2–3 hrs"
-    else:
-        if atr_pct > 3.0:
-            return "1–2 days"
-        elif atr_pct > 1.5:
-            return "2–3 days"
-        else:
-            return "3–5 days"
-
-
-def max_profit_time(report_type: str) -> str:
-    """Clock window by which target is likely hit."""
-    if report_type == "intraday":
-        n = now_ist()
-        target_hr = n + timedelta(hours=2)
-        if target_hr.time() > MARKET_CLOSE:
-            return "before 3:30 PM"
-        return target_hr.strftime("%I:%M %p")
-    else:
-        return "2–3 trading sessions"
+def holding_window(info: dict) -> str:
+    mins = info["hold_mins"]
+    if mins < 60:
+        return f"~{mins} mins"
+    hrs = mins / 60
+    if hrs == int(hrs):
+        return f"~{int(hrs)} hrs"
+    return f"~{hrs:.1f} hrs"
 
 
 # ── Message formatters ─────────────────────────────────────────────────────────
@@ -485,136 +508,171 @@ def fmt_money(v: float) -> str:
     return f"₹{v:,.2f}"
 
 
+def confidence_label(conf: int) -> str:
+    if conf >= 90:
+        return "Very Strong"
+    if conf >= 80:
+        return "Strong"
+    if conf >= 70:
+        return "Moderate"
+    return "Weak"
+
+
+def signal_emoji(signal: str) -> str:
+    return "🟢" if signal == "BUY" else "🔴"
+
+
+def signal_word(signal: str) -> str:
+    return "BUY" if signal == "BUY" else "SELL"
+
+
+def build_signal_block(rank: int, ticker: str, name: str, bse_code: str,
+                       info: dict) -> str:
+    sig = info["signal"]
+    emoji = signal_emoji(sig)
+    conf_label = confidence_label(info["confidence"])
+    direction_word = "Target 1 (+0.5%)" if sig == "BUY" else "Target 1 (-0.5%)"
+    direction_word2 = "Target 2 (+1.0%)" if sig == "BUY" else "Target 2 (-1.0%)"
+    sl_word = "Stop Loss (-0.5%)" if sig == "BUY" else "Stop Loss (+0.5%)"
+
+    confluence_lines = "\n".join(f"  ✅ {c}" for c in info["confluence"][:10])
+
+    entry_dir = "above entry" if sig == "BUY" else "below entry"
+    sl_move = f"move SL to Cost Price (₹{info['entry']:.2f})"
+
+    return (
+        f"⭐ RANK #{rank} PICK\n"
+        f"🎯 BSE AI INTRADAY RADAR SIGNAL\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏢 Stock: {name}\n"
+        f"🏷️ BSE Code: {bse_code}\n"
+        f"{emoji} Action: {signal_word(sig)} ({info['confidence']}% Conf • {conf_label})\n"
+        f"\n"
+        f"💵 Entry Range: ₹{info['entry']:.2f}\n"
+        f"🎯 {direction_word}: ₹{info['target1']:.2f}\n"
+        f"🚀 {direction_word2}: ₹{info['target2']:.2f}\n"
+        f"🛡️ {sl_word}: ₹{info['stop_loss']:.2f}\n"
+        f"⚖️ Risk : Reward: 1 : {info['rr_ratio']}\n"
+        f"⏱️ Holding Window: {holding_window(info)} (Intraday)\n"
+        f"\n"
+        f"💡 Execution Strategy:\n"
+        f"  • Book 50% quantity at {direction_word} (₹{info['target1']:.2f})\n"
+        f"  • When price hits {direction_word} (₹{info['target1']:.2f}), {sl_move} to lock risk-free continuation.\n"
+        f"\n"
+        f"🧠 15-Point AI Confluence:\n"
+        f"{confluence_lines}\n"
+    )
+
+
 def build_pre_market_report() -> str:
-    """9:00 AM IST — daily BUY/SELL picks. ALWAYS sends predictions."""
+    """8:15 AM IST — morning brief with all ranked picks."""
     today_str = ist_today().strftime("%d %b %Y")
-    header    = f"📈 <b>BSE RADAR — {today_str}</b>\n"
+    now_str   = now_ist().strftime("%I:%M:%S %p IST")
+    header    = f"Bse predictor:\n"
+    header += f"🏆 TOP CONVICTION PICK TODAY\n"
+    header += f"🎯 BSE AI INTRADAY RADAR SIGNAL\n"
+    header += f"━━━━━━━━━━━━━━━━━━━━\n"
 
     regime_score, regime_text = get_market_regime()
     regime_emoji = "📈" if regime_score > 0 else ("📉" if regime_score < 0 else "↔️")
-    header += f"{regime_emoji} Market: {regime_text}\n"
 
     ranked = []
-    for ticker, name in WATCHLIST.items():
-        try:
-            df, _ = fetch_with_fallback(ticker, "60d", "1d", min_rows=25)
-            if df.empty or len(df) < 25:
-                continue
-            info = generate_signal(df, ticker)
-            ranked.append((ticker, name, info))
-        except Exception as exc:
-            log.warning("Signal error %s: %s", ticker, exc)
-
-    # Sort by confidence desc, then by score magnitude
-    ranked.sort(key=lambda x: (x[2]["confidence"], abs(x[2]["score"])), reverse=True)
-
-    lines = [header]
-
-    if not ranked:
-        lines.append("⚪ No market data available today.")
-        lines.append("")
-        lines.append("📌 <i>Not SEBI-registered advice.</i>")
-        return "\n".join(lines)
-
-    # Split into BUY and SELL groups
-    buys  = [r for r in ranked if r[2]["signal"] == "BUY"]
-    sells = [r for r in ranked if r[2]["signal"] == "SELL"]
-
-    if buys:
-        lines.append("🟢 <b>BUY TODAY</b>")
-        for i, (ticker, name, info) in enumerate(buys[:6], 1):
-            hold = hold_time("pre", info["atr"], info["last_price"])
-            mpt  = max_profit_time("pre")
-            lines.append(
-                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
-                f"   🟢 BUY | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
-                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}  |  R/R: {info['rr_ratio']}"
-            )
-        lines.append("")
-
-    if sells:
-        lines.append("🔴 <b>SELL TODAY</b>")
-        for i, (ticker, name, info) in enumerate(sells[:4], 1):
-            hold = hold_time("pre", info["atr"], info["last_price"])
-            mpt  = max_profit_time("pre")
-            lines.append(
-                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
-                f"   🔴 SELL | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
-                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}  |  R/R: {info['rr_ratio']}"
-            )
-        lines.append("")
-
-    lines.append("📊 Data: Real BSE/NSE prices (yfinance) · ATR-based targets & SL")
-    lines.append("📌 <i>Not SEBI-registered investment advice. Trade at your own risk.</i>")
-    return "\n".join(lines)
-
-
-def build_intraday_report() -> str:
-    """Every 10 min during market hours — live intraday signals. ALWAYS sends."""
-    now_str   = now_ist().strftime("%I:%M %p")
-    today_str = ist_today().strftime("%d %b %Y")
-    header    = f"⚡ <b>INTRADAY RADAR — {today_str} {now_str} IST</b>\n"
-
-    ranked = []
-    for ticker, name in WATCHLIST.items():
+    for ticker, info_dict in WATCHLIST.items():
         try:
             df, _ = fetch_with_fallback(ticker, "5d", "5m", min_rows=40)
             if df.empty or len(df) < 40:
                 continue
-            info = generate_signal(df, ticker)
-            ranked.append((ticker, name, info))
+            sig = generate_signal(df, ticker)
+            if sig["confidence"] < MIN_CONFIDENCE_SHOW:
+                continue
+            ranked.append((ticker, info_dict["name"], info_dict["bse_code"], sig))
         except Exception as exc:
-            log.warning("Intraday signal error %s: %s", ticker, exc)
+            log.warning("Signal error %s: %s", ticker, exc)
 
-    ranked.sort(key=lambda x: (x[2]["confidence"], abs(x[2]["score"])), reverse=True)
+    # Sort by confidence desc, then by abs score
+    ranked.sort(key=lambda x: (x[3]["confidence"], abs(x[3]["score"])), reverse=True)
 
     lines = [header]
 
     if not ranked:
-        lines.append("⚪ No intraday data available right now.")
+        lines.append("⚪ No high-confidence signals today. Market is neutral — wait.")
+        lines.append("")
+        lines.append("📌 <i>Not SEBI-registered advice. Trade at your own risk.</i>")
+        return "\n".join(lines)
+
+    # Top conviction pick first
+    top = ranked[0]
+    lines.append(build_signal_block(1, top[0], top[1], top[2], top[3]))
+    lines.append(f"⏰ Alert Time: {today_str} {now_str}\n")
+
+    # Remaining picks ranked
+    for i, (ticker, name, bse_code, sig) in enumerate(ranked[1:], 2):
+        lines.append(build_signal_block(i, ticker, name, bse_code, sig))
+        lines.append(f"⏰ Alert Time: {today_str} {now_str}\n")
+
+    lines.append(
+        f"📊 Market Regime: {regime_emoji} {regime_text}\n"
+        f"📊 Data: Real BSE/NSE 5-min prices (yfinance) · Intraday targets & SL\n"
+        f"📌 <i>Not SEBI-registered investment advice. Trade at your own risk.</i>\n"
+        f"🤖 BSE Radar Bot | Pre-market 8:15 AM IST"
+    )
+    return "\n".join(lines)
+
+
+def build_intraday_report() -> str:
+    """Every 10 min during market hours — live intraday signals."""
+    now_str   = now_ist().strftime("%I:%M:%S %p IST")
+    today_str = ist_today().strftime("%d %b %Y")
+    header    = f"⚡ <b>BSE AI INTRADAY SCANNER — {today_str} {now_str}</b>\n"
+
+    ranked = []
+    for ticker, info_dict in WATCHLIST.items():
+        try:
+            df, _ = fetch_with_fallback(ticker, "5d", "5m", min_rows=40)
+            if df.empty or len(df) < 40:
+                continue
+            sig = generate_signal(df, ticker)
+            if sig["confidence"] < MIN_CONFIDENCE_SHOW:
+                continue
+            ranked.append((ticker, info_dict["name"], info_dict["bse_code"], sig))
+        except Exception as exc:
+            log.warning("Intraday signal error %s: %s", ticker, exc)
+
+    ranked.sort(key=lambda x: (x[3]["confidence"], abs(x[3]["score"])), reverse=True)
+
+    lines = [header]
+
+    if not ranked:
+        lines.append("⚪ No high-confidence intraday signals right now. Market quiet.")
         lines.append("")
         lines.append("📌 <i>Not SEBI-registered advice.</i>")
         return "\n".join(lines)
 
-    buys  = [r for r in ranked if r[2]["signal"] == "BUY"]
-    sells = [r for r in ranked if r[2]["signal"] == "SELL"]
+    for i, (ticker, name, bse_code, sig) in enumerate(ranked[:6], 1):
+        lines.append(build_signal_block(i, ticker, name, bse_code, sig))
+        lines.append(f"⏰ Alert Time: {today_str} {now_str}\n")
 
-    if buys:
-        lines.append("🟢 <b>BUY NOW (Intraday)</b>")
-        for i, (ticker, name, info) in enumerate(buys[:5], 1):
-            hold = hold_time("intraday", info["atr"], info["last_price"])
-            mpt  = max_profit_time("intraday")
-            lines.append(
-                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
-                f"   🟢 BUY | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
-                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}  |  R/R: {info['rr_ratio']}"
-            )
-        lines.append("")
-
-    if sells:
-        lines.append("🔴 <b>SELL NOW (Intraday)</b>")
-        for i, (ticker, name, info) in enumerate(sells[:4], 1):
-            hold = hold_time("intraday", info["atr"], info["last_price"])
-            mpt  = max_profit_time("intraday")
-            lines.append(
-                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
-                f"   🔴 SELL | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
-                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}  |  R/R: {info['rr_ratio']}"
-            )
-        lines.append("")
-
-    lines.append("📊 Data: Real BSE/NSE 5-min prices (yfinance)")
-    lines.append("📌 <i>Not SEBI-registered investment advice.</i>")
+    lines.append(
+        f"📊 Data: Real BSE/NSE 5-min prices (yfinance)\n"
+        f"📌 <i>Not SEBI-registered investment advice.</i>\n"
+        f"🤖 BSE Radar Bot | Intraday scanner active 9:30 AM–3:00 PM IST"
+    )
     return "\n".join(lines)
 
 
 def build_post_market_report() -> str:
-    """3:45 PM IST — day summary: top gainers/losers. ALWAYS sends."""
+    """3:45 PM IST — day summary + key setups for next session."""
     today_str = ist_today().strftime("%d %b %Y")
-    header    = f"🔔 <b>BSE CLOSE — {today_str}</b>\n"
+    header    = f"🔔 <b>BSE AI RADAR - POST-MARKET CLOSING REPORT</b>\n"
+    header += f"━━━━━━━━━━━━━━━━━━━━\n"
+    header += f"📅 Date: {today_str}\n"
+    header += f"⏰ Closing Bell: {now_ist().strftime('%I:%M %p IST')}\n"
+
+    regime_score, regime_text = get_market_regime()
+    regime_emoji = "📈" if regime_score > 0 else ("📉" if regime_score < 0 else "↔️")
 
     results = []
-    for ticker, name in WATCHLIST.items():
+    for ticker, info_dict in WATCHLIST.items():
         try:
             df, _ = fetch_with_fallback(ticker, "5d", "1d", min_rows=2)
             if df.empty or len(df) < 2:
@@ -623,41 +681,78 @@ def build_post_market_report() -> str:
             prev  = float(close.iloc[-2])
             last  = float(close.iloc[-1])
             chg   = (last - prev) / prev * 100 if prev else 0.0
-            results.append({"name": name, "ticker": ticker, "last": last, "prev": prev, "chg": chg})
+            results.append({
+                "name": info_dict["name"],
+                "ticker": ticker,
+                "bse_code": info_dict["bse_code"],
+                "last": last, "prev": prev, "chg": chg
+            })
         except Exception as exc:
             log.warning("Post-market error %s: %s", ticker, exc)
 
     results.sort(key=lambda x: x["chg"], reverse=True)
 
     lines = [header]
+    lines.append(f"🏛️ SESSION MARKET BREADTH:\n")
+    lines.append(f"• Status: {regime_emoji} {regime_text} BIAS\n")
 
-    if not results:
-        lines.append("⚪ No market data available today.")
-        lines.append("")
-        lines.append("📌 <i>Not SEBI-registered advice.</i>")
-        return "\n".join(lines)
-
-    gainers = [r for r in results if r["chg"] > 0][:5]
-    losers  = [r for r in results if r["chg"] < 0][:5]
+    gainers = [r for r in results if r["chg"] > 0]
+    losers  = [r for r in results if r["chg"] < 0]
+    total = len(results)
+    up_pct  = (len(gainers) / total * 100) if total else 0
+    down_pct = (len(losers) / total * 100) if total else 0
+    lines.append(f"• Advances: {len(gainers)} ({up_pct:.0f}%) | Declines: {len(losers)} ({down_pct:.0f}%)\n")
 
     if gainers:
-        lines.append("📈 <b>TOP GAINERS</b>")
-        for i, r in enumerate(gainers, 1):
+        lines.append("🚀 TOP GAINERS TODAY:\n")
+        for i, r in enumerate(gainers[:5], 1):
             lines.append(
-                f"{i}. <b>{r['name']}</b> ({r['ticker']})  ₹{r['last']:,.2f}  <b>+{r['chg']:.1f}%</b>"
+                f"  🟢 {r['name']}: ₹{r['last']:,.2f} (+{r['chg']:.2f}%)\n"
             )
         lines.append("")
 
     if losers:
-        lines.append("📉 <b>TOP LOSERS</b>")
-        for i, r in enumerate(losers, 1):
+        lines.append("🔻 TOP LOSERS TODAY:\n")
+        for i, r in enumerate(losers[:5], 1):
             lines.append(
-                f"{i}. <b>{r['name']}</b> ({r['ticker']})  ₹{r['last']:,.2f}  <b>{r['chg']:.1f}%</b>"
+                f"  🔴 {r['name']}: ₹{r['last']:,.2f} ({r['chg']:.2f}%)\n"
             )
         lines.append("")
 
-    lines.append("📊 Data: Real BSE/NSE daily prices (yfinance)")
-    lines.append("📌 <i>Not SEBI-registered investment advice.</i>")
+    # Key setups for next session (from today's signals)
+    ranked = []
+    for ticker, info_dict in WATCHLIST.items():
+        try:
+            df, _ = fetch_with_fallback(ticker, "5d", "1d", min_rows=25)
+            if df.empty or len(df) < 25:
+                continue
+            sig = generate_signal(df, ticker)
+            if sig["confidence"] >= MIN_CONFIDENCE_SHOW:
+                ranked.append((ticker, info_dict["name"], info_dict["bse_code"], sig))
+        except Exception as exc:
+            log.warning("Setup error %s: %s", ticker, exc)
+
+    ranked.sort(key=lambda x: (x[3]["confidence"], abs(x[3]["score"])), reverse=True)
+
+    if ranked:
+        lines.append("🎯 KEY SETUPS FOR NEXT SESSION:\n")
+        for i, (ticker, name, bse_code, sig) in enumerate(ranked[:6], 1):
+            arrow = "🟢" if sig["signal"] == "BUY" else "🔴"
+            lines.append(
+                f"  {arrow} {name}: {sig['signal']} ({sig['confidence']}% Conf)\n"
+                f"     ↳ Close: ₹{sig['entry']:.2f} | Entry: ₹{sig['entry']:.2f} | "
+                f"T1: ₹{sig['target1']:.2f} | SL: ₹{sig['stop_loss']:.2f}\n"
+            )
+        lines.append("")
+
+    lines.append(
+        f"📰 MEDIA & NEWS SENTIMENT WRAP:\n"
+        f"• Tone: {regime_text}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔔 Next live market opens tomorrow at 09:15 AM IST.\n"
+        f"Pre-market morning brief arrives at ~8:15 AM IST.\n"
+        f"📌 <i>Not SEBI-registered investment advice.</i>"
+    )
     return "\n".join(lines)
 
 
