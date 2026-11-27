@@ -1,5 +1,5 @@
 """
-BSE Radar Bot — Production v6.0
+BSE Radar Bot — Production v6.1
 Detailed intraday signals matching the proven format:
 - Stock name + BSE Code
 - BUY/SELL with confidence %
@@ -7,7 +7,7 @@ Detailed intraday signals matching the proven format:
 - Stop Loss (-0.5%), Risk:Reward 1:2
 - Holding window in minutes (intraday)
 - Execution strategy (book 50% at T1, move SL to cost)
-- 15-Point AI Confluence breakdown
+- 20-Point AI Confluence breakdown
 - Pre-market brief, intraday scanner every 10 min, post-market report
 
 Schedule (IST):
@@ -311,18 +311,235 @@ def get_market_regime() -> tuple[float, str]:
         return 0.0, "NEUTRAL"
 
 
+# ── Additional technical indicators (v6.1 expansion) ───────────────────────────
+
+def compute_stochastic(df: pd.DataFrame, period: int = 14, smooth: int = 3) -> tuple[float, float]:
+    """Stochastic Oscillator %K and %D — momentum overbought/oversold."""
+    try:
+        if len(df) < period + smooth or not {"High", "Low", "Close"}.issubset(df.columns):
+            return 50.0, 50.0
+        high = _squeeze(df["High"])
+        low  = _squeeze(df["Low"])
+        close = _squeeze(df["Close"])
+        lowest_low  = low.rolling(window=period).min()
+        highest_high = high.rolling(window=period).max()
+        denom = highest_high - lowest_low
+        k = 100 * ((close - lowest_low) / denom.replace(0, np.nan))
+        d = k.rolling(window=smooth).mean()
+        k_val = float(k.iloc[-1]); d_val = float(d.iloc[-1])
+        if np.isnan(k_val): k_val = 50.0
+        if np.isnan(d_val): d_val = 50.0
+        return k_val, d_val
+    except Exception as exc:
+        log.warning("Stochastic failed: %s", exc)
+        return 50.0, 50.0
+
+
+def compute_williams_r(df: pd.DataFrame, period: int = 14) -> float:
+    """Williams %R — overbought/oversold momentum."""
+    try:
+        if len(df) < period + 1 or not {"High", "Low", "Close"}.issubset(df.columns):
+            return -50.0
+        high = _squeeze(df["High"])
+        low  = _squeeze(df["Low"])
+        close = _squeeze(df["Close"])
+        highest_high = high.rolling(window=period).max()
+        lowest_low   = low.rolling(window=period).min()
+        wr = -100 * ((highest_high - close) / (highest_high - lowest_low).replace(0, np.nan))
+        val = float(wr.iloc[-1])
+        return float(val) if not np.isnan(val) else -50.0
+    except Exception as exc:
+        log.warning("Williams %R failed: %s", exc)
+        return -50.0
+
+
+def compute_cci(df: pd.DataFrame, period: int = 20) -> float:
+    """Commodity Channel Index — cyclical trend + overbought/oversold."""
+    try:
+        if len(df) < period + 1 or not {"High", "Low", "Close"}.issubset(df.columns):
+            return 0.0
+        high = _squeeze(df["High"])
+        low  = _squeeze(df["Low"])
+        close = _squeeze(df["Close"])
+        tp = (high + low + close) / 3
+        sma = tp.rolling(window=period).mean()
+        mean_dev = tp.rolling(window=period).apply(lambda x: float(np.abs(x - x.mean()).mean()), raw=True)
+        cci = (tp - sma) / (0.015 * mean_dev.replace(0, np.nan))
+        val = float(cci.iloc[-1])
+        return float(val) if not np.isnan(val) else 0.0
+    except Exception as exc:
+        log.warning("CCI failed: %s", exc)
+        return 0.0
+
+
+def compute_roc(close: pd.Series, period: int = 10) -> float:
+    """Rate of Change — speed of price movement (momentum)."""
+    try:
+        close = _squeeze(close)
+        if len(close) < period + 1:
+            return 0.0
+        old = close.iloc[-(period + 1)]
+        new = close.iloc[-1]
+        if old == 0 or np.isnan(old):
+            return 0.0
+        return float((new - old) / old * 100)
+    except Exception as exc:
+        log.warning("ROC failed: %s", exc)
+        return 0.0
+
+
+def compute_obv(df: pd.DataFrame) -> tuple[float, bool]:
+    """On-Balance Volume — volume trend confirmation. Returns (OBV value, rising?)."""
+    try:
+        if "Volume" not in df.columns or "Close" not in df.columns or len(df) < 10:
+            return 0.0, False
+        close = _squeeze(df["Close"])
+        vol = _squeeze(df["Volume"])
+        direction = np.sign(close.diff()).fillna(0)
+        obv = (direction * vol).cumsum()
+        rising = bool(obv.iloc[-1] > obv.iloc[-2]) if len(obv) >= 2 else False
+        return float(obv.iloc[-1]), rising
+    except Exception as exc:
+        log.warning("OBV failed: %s", exc)
+        return 0.0, False
+
+
+def compute_adx(df: pd.DataFrame, period: int = 14) -> tuple[float, str]:
+    """Average Directional Index — trend strength (0-100). Returns (value, strength label)."""
+    try:
+        if len(df) < period * 2 + 1 or not {"High", "Low", "Close"}.issubset(df.columns):
+            return 0.0, "Weak"
+        high = _squeeze(df["High"])
+        low  = _squeeze(df["Low"])
+        close = _squeeze(df["Close"])
+
+        up_move   = high.diff()
+        down_move = -low.diff()
+
+        plus_dm  = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+        tr = pd.concat([high - low,
+                        (high - close.shift(1)).abs(),
+                        (low  - close.shift(1)).abs()], axis=1).max(axis=1)
+
+        atr_series = tr.ewm(span=period, adjust=False).mean()
+        plus_di  = 100 * (pd.Series(plus_dm, index=tr.index).ewm(span=period, adjust=False).mean() / atr_series.replace(0, np.nan))
+        minus_di = 100 * (pd.Series(minus_dm, index=tr.index).ewm(span=period, adjust=False).mean() / atr_series.replace(0, np.nan))
+
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+        adx = dx.ewm(span=period, adjust=False).mean()
+        val = float(adx.iloc[-1])
+        if np.isnan(val): val = 0.0
+        if val >= 25:
+            label = "Strong"
+        elif val >= 20:
+            label = "Moderate"
+        else:
+            label = "Weak"
+        return round(val, 1), label
+    except Exception as exc:
+        log.warning("ADX failed: %s", exc)
+        return 0.0, "Weak"
+
+
+def compute_parabolic_sar(df: pd.DataFrame, step: float = 0.02, max_step: float = 0.2) -> tuple[float, str]:
+    """Parabolic SAR — trend direction + trailing stop level. Returns (SAR value, trend)."""
+    try:
+        if len(df) < 10 or not {"High", "Low", "Close"}.issubset(df.columns):
+            return float(_squeeze(df["Close"]).iloc[-1]), "Neutral"
+        high = _squeeze(df["High"])
+        low  = _squeeze(df["Low"])
+        close = _squeeze(df["Close"])
+
+        sar = [float(close.iloc[0])]
+        trend = 1  # 1 = up, -1 = down
+        ep = float(low.iloc[0])
+        af = step
+
+        for i in range(1, len(close)):
+            prev_sar = sar[-1]
+            if trend == 1:
+                sar_val = prev_sar + af * (ep - prev_sar)
+                sar_val = min(sar_val, float(low.iloc[i-1]), float(low.iloc[i-2]) if i >= 2 else float(low.iloc[i-1]))
+                if float(low.iloc[i]) < sar_val:
+                    trend = -1
+                    sar_val = ep
+                    ep = float(low.iloc[i])
+                    af = step
+            else:
+                sar_val = prev_sar + af * (ep - prev_sar)
+                sar_val = max(sar_val, float(high.iloc[i-1]), float(high.iloc[i-2]) if i >= 2 else float(high.iloc[i-1]))
+                if float(high.iloc[i]) > sar_val:
+                    trend = 1
+                    sar_val = ep
+                    ep = float(high.iloc[i])
+                    af = step
+            # Step up AF
+            if trend == 1 and float(high.iloc[i]) > ep:
+                ep = float(high.iloc[i]); af = min(af + step, max_step)
+            if trend == -1 and float(low.iloc[i]) < ep:
+                ep = float(low.iloc[i]); af = min(af + step, max_step)
+            sar.append(sar_val)
+
+        last_sar = sar[-1]
+        last_price = float(close.iloc[-1])
+        trend_label = "Bullish" if last_price > last_sar else "Bearish"
+        return round(last_sar, 2), trend_label
+    except Exception as exc:
+        log.warning("Parabolic SAR failed: %s", exc)
+        return float(_squeeze(df["Close"]).iloc[-1]) if len(df) > 0 else 0.0, "Neutral"
+
+
+def compute_ichimoku(df: pd.DataFrame) -> tuple[str, float, float]:
+    """Ichimoku Cloud — trend + support/resistance. Returns (signal, senkou_span_a, senkou_span_b)."""
+    try:
+        if len(df) < 52 or not {"High", "Low", "Close"}.issubset(df.columns):
+            return "Neutral", 0.0, 0.0
+        high = _squeeze(df["High"])
+        low  = _squeeze(df["Low"])
+        close = _squeeze(df["Close"])
+
+        tenkan = (high.rolling(window=9).max() + low.rolling(window=9).min()) / 2
+        kijun  = (high.rolling(window=26).max() + low.rolling(window=26).min()) / 2
+        span_a = ((tenkan + kijun) / 2).shift(26)
+        span_b = ((high.rolling(window=52).max() + low.rolling(window=52).min()) / 2).shift(26)
+
+        last_close = float(close.iloc[-1])
+        last_span_a = float(span_a.iloc[-1]) if not np.isnan(span_a.iloc[-1]) else last_close
+        last_span_b = float(span_b.iloc[-1]) if not np.isnan(span_b.iloc[-1]) else last_close
+        last_tenkan = float(tenkan.iloc[-1]) if not np.isnan(tenkan.iloc[-1]) else last_close
+        last_kijun  = float(kijun.iloc[-1]) if not np.isnan(kijun.iloc[-1]) else last_close
+
+        cloud_top = max(last_span_a, last_span_b)
+        cloud_bot = min(last_span_a, last_span_b)
+
+        if last_close > cloud_top and last_tenkan > last_kijun:
+            signal = "Bullish"
+        elif last_close < cloud_bot and last_tenkan < last_kijun:
+            signal = "Bearish"
+        else:
+            signal = "Neutral"
+        return signal, round(cloud_top, 2), round(cloud_bot, 2)
+    except Exception as exc:
+        log.warning("Ichimoku failed: %s", exc)
+        return "Neutral", 0.0, 0.0
+
+
 # ── Core signal scorer — intraday focused ──────────────────────────────────────
 
 def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     """
     Intraday confluence scoring: RSI, MACD, EMA trend, volume, momentum,
-    Bollinger Bands, VWAP, support/resistance, multi-timeframe bias, market regime.
+    Bollinger Bands, VWAP, support/resistance, multi-timeframe bias,
+    Stochastic, Williams %R, CCI, ROC, OBV, ADX, Parabolic SAR, Ichimoku.
     Returns BUY or SELL with entry, T1, T2, SL, R/R, holding window, confluence factors.
     """
     close      = _squeeze(df["Close"])
     last_price = float(close.iloc[-1])
     atr        = compute_atr(df)
 
+    # Core indicators
     rsi            = compute_rsi(close)
     macd_l, macd_s = compute_macd(close)
     macd_bull      = macd_l > macd_s
@@ -342,6 +559,17 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     vwap_bull = vwap_confirm(df)
     support, resistance = support_resistance(df)
     bias_score, bias_text = get_multi_timeframe_bias(ticker) if ticker else (0.0, "Neutral")
+
+    # New indicators (v6.1)
+    stoch_k, stoch_d = compute_stochastic(df)
+    stoch_bull = stoch_k > stoch_d
+    willr = compute_williams_r(df)
+    cci = compute_cci(df)
+    roc = compute_roc(close, period=10)
+    obv_val, obv_rising = compute_obv(df)
+    adx_val, adx_label = compute_adx(df)
+    sar_val, sar_trend = compute_parabolic_sar(df)
+    ichi_signal, ichi_top, ichi_bot = compute_ichimoku(df)
 
     score = 0
     confluence = []
@@ -425,9 +653,82 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
         score -= 1
         confluence.append(f"MTF Bias: {bias_text}")
 
+    # 10. Stochastic Oscillator
+    if stoch_bull and stoch_k < 80:
+        score += 1
+        confluence.append(f"Stoch Bullish (K {stoch_k:.0f})")
+    elif not stoch_bull and stoch_k > 20:
+        score -= 1
+        confluence.append(f"Stoch Bearish (K {stoch_k:.0f})")
+    elif stoch_k <= 20:
+        confluence.append(f"Stoch Oversold (K {stoch_k:.0f})")
+    elif stoch_k >= 80:
+        confluence.append(f"Stoch Overbought (K {stoch_k:.0f})")
+    else:
+        confluence.append(f"Stoch (K {stoch_k:.0f})")
+
+    # 11. Williams %R
+    if willr < -80:
+        confluence.append(f"Williams %R Oversold ({willr:.0f})")
+    elif willr > -20:
+        confluence.append(f"Williams %R Overbought ({willr:.0f})")
+    else:
+        confluence.append(f"Williams %R ({willr:.0f})")
+
+    # 12. CCI
+    if cci < -100:
+        confluence.append(f"CCI Oversold ({cci:.0f})")
+    elif cci > 100:
+        confluence.append(f"CCI Overbought ({cci:.0f})")
+    else:
+        confluence.append(f"CCI ({cci:.0f})")
+
+    # 13. ROC (Rate of Change)
+    if roc > 1.0:
+        score += 1
+        confluence.append(f"ROC Bullish (+{roc:.1f}%)")
+    elif roc < -1.0:
+        score -= 1
+        confluence.append(f"ROC Bearish ({roc:.1f}%)")
+    else:
+        confluence.append(f"ROC ({roc:+.1f}%)")
+
+    # 14. OBV
+    if obv_rising:
+        confluence.append("OBV Rising (volume confirming)")
+    else:
+        confluence.append("OBV Falling")
+
+    # 15. ADX (trend strength)
+    if adx_val >= 25:
+        confluence.append(f"ADX Strong Trend ({adx_val})")
+    elif adx_val >= 20:
+        confluence.append(f"ADX Moderate Trend ({adx_val})")
+    else:
+        confluence.append(f"ADX Weak Trend ({adx_val})")
+
+    # 16. Parabolic SAR
+    price_above_sar = last_price > sar_val
+    if price_above_sar and sar_trend == "Bullish":
+        confluence.append("Parabolic SAR Bullish")
+    elif not price_above_sar and sar_trend == "Bearish":
+        confluence.append("Parabolic SAR Bearish")
+    else:
+        confluence.append(f"Parabolic SAR ({sar_trend})")
+
+    # 17. Ichimoku Cloud
+    if ichi_signal == "Bullish":
+        score += 1
+        confluence.append("Ichimoku Bullish Cloud")
+    elif ichi_signal == "Bearish":
+        score -= 1
+        confluence.append("Ichimoku Bearish Cloud")
+    else:
+        confluence.append("Ichimoku Neutral Cloud")
+
     signal = "BUY" if score >= 0 else "SELL"
 
-    # Confidence calculation
+    # Confidence calculation — more factors checked = higher confidence
     factors_hit = sum([
         abs(rsi - 50) > 15,
         macd_l != 0,
@@ -436,13 +737,21 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
         vol >= 1.2,
         abs(bb_pos - 0.5) > 0.3,
         abs(bias_score) >= 0.5,
-        vwap_bull or not vwap_bull,  # VWAP always counts as a factor checked
+        abs(stoch_k - 50) > 20,
+        abs(willr) > 40,
+        abs(cci) > 100,
+        abs(roc) > 1.0,
+        obv_rising is not None,
+        adx_val >= 20,
+        abs(last_price - sar_val) > 0.01,
+        ichi_signal != "Neutral",
+        vwap_bull or not vwap_bull,
     ])
-    confidence = min(92, 55 + factors_hit * 4)
-    if abs(score) >= 4:
-        confidence = min(92, confidence + 5)
-    if abs(score) >= 6:
-        confidence = min(95, confidence + 5)
+    confidence = min(94, 50 + factors_hit * 3)
+    if abs(score) >= 5:
+        confidence = min(95, confidence + 4)
+    if abs(score) >= 8:
+        confidence = min(98, confidence + 4)
 
     # Entry, Targets, Stop Loss (intraday percentages)
     if signal == "BUY":
@@ -487,6 +796,16 @@ def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
         "confluence":  confluence,
         "atr":         atr,
         "mom":         mom,
+        # v6.1 new indicators (exposed for logging / future use)
+        "stoch_k":     round(stoch_k, 2),
+        "willr":       round(willr, 2),
+        "cci":         round(cci, 2),
+        "roc":         round(roc, 2),
+        "obv_rising":  obv_rising,
+        "adx":         adx_val,
+        "sar":         sar_val,
+        "sar_trend":   sar_trend,
+        "ichimoku":    ichi_signal,
     }
 
 
