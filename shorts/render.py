@@ -35,11 +35,11 @@ log = logging.getLogger("shorts.render")
 WIDTH = 1080
 HEIGHT = 1920
 FPS = 30
-FONT_SIZE_TITLE = 72
-FONT_SIZE_CAPTION = 52
-FONT_SIZE_HOOK = 62
-CAPTION_LINE_MAX = 38  # characters per line
-CAPTION_Y = HEIGHT - 260  # where captions appear
+FONT_SIZE_TITLE = 56
+FONT_SIZE_CAPTION = 50
+FONT_SIZE_HOOK = 56
+CAPTION_LINE_MAX = 36  # characters per line
+CAPTION_Y = HEIGHT - 250  # where captions appear
 
 
 # ---------------------------------------------------------------------------
@@ -181,15 +181,22 @@ def _draw_large_text_block(
     y_center: int = 800,
 ) -> None:
     """Draw the main scene text — large, centered, with accent color highlight."""
-    lines = _wrap_text(text, 26)  # fewer chars per line for large text
+    lines = _wrap_text(text, 30)  # chars per line
+    # Cap total height so long text never runs off-screen
+    max_lines = 9
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = lines[-1].rstrip() + "..."
     draw = ImageDraw.Draw(img)
-    line_h = FONT_SIZE_TITLE + 12
+    line_h = FONT_SIZE_TITLE + 14
     total_h = len(lines) * line_h
     y_start = y_center - total_h // 2
     accent_rgb = _hex_to_rgb(accent)
 
     for i, line in enumerate(lines):
         y = y_start + i * line_h
+        if y + line_h > HEIGHT - 320:  # stop before caption area
+            break
         # Slight color variation: first word in accent, rest in white
         words = line.split(" ", 1)
         if len(words) == 2 and i == 0:

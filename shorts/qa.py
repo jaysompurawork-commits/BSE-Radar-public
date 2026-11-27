@@ -57,15 +57,17 @@ def _check_blackframes(path: str) -> float:
         )
         output = result.stderr
         black_seconds = 0.0
+        # ffmpeg blackdetect prints like:
+        #   [Parsed_blackdetect_0 @ 0x...] black_start:0.000000 black_end:1.500000 black_duration:1.500000
         for line in output.split("\n"):
-            if "black_duration" in line:
-                for part in line.split(":"):
-                    if "black_duration" in part:
-                        try:
-                            val = float(part.split("=")[1].strip())
-                            black_seconds += val
-                        except (IndexError, ValueError):
-                            pass
+            if "black_duration" not in line:
+                continue
+            for token in line.replace(":", " ").split():
+                if token.startswith("black_duration:"):
+                    try:
+                        black_seconds += float(token.split(":", 1)[1])
+                    except (IndexError, ValueError):
+                        pass
         # Get total duration from format
         probe = _run_ffprobe(path)
         total = float(probe.get("format", {}).get("duration", 60))
