@@ -1,22 +1,23 @@
 """
-BSE Radar Bot — Production v3.0
-Sends clean, actionable predictions to Telegram.
+BSE Radar Bot — Production v4.0
+Always sends daily predictions to Telegram.
 
 Schedule (IST):
-  - Pre-market :  9:00 AM  → BUY/SELL picks for the day (daily data)
-  - Intraday   : every 30 min, 9:30 AM–3:00 PM → live intraday signals
-  - Post-market:  4:00 PM  → day summary
+  - Pre-market :  9:00 AM  → daily BUY/SELL picks (always sends)
+  - Intraday   : every 10 min, 9:30 AM–3:00 PM → live intraday signals
+  - Post-market:  3:45 PM  → day summary: top gainers/losers
 
-Message format (minimal, actionable):
-  Stock Name | ₹Price | BUY/SELL | Hold: Xh | SL: ₹X | Target by: HH:MM
+Message format (every pick):
+  Stock Name (TICKER.BO) | ₹Price | BUY/SELL | Hold: X | Target by: HH:MM
+  🎯 Target: ₹X  |  🛑 SL: ₹X
 
 Env vars required:
   TELEGRAM_BOT_TOKEN  — bot token from @BotFather
-  TELEGRAM_CHAT_IDS   — comma-separated chat IDs (groups use negative numbers)
+  TELEGRAM_CHAT_IDS   — comma-separated chat IDs
   TELEGRAM_CHAT_ID    — single chat ID (legacy, also supported)
   REPORT_TYPE         — "pre", "intraday", or "post"
 
-Disclaimer: Technical analysis only. Not SEBI-registered advice. Trade at your own risk.
+Disclaimer: Technical analysis only. Not SEBI-registered investment advice.
 """
 
 import os
@@ -40,7 +41,7 @@ logging.basicConfig(
 log = logging.getLogger("bse_radar")
 
 
-# ── Stock universe ─────────────────────────────────────────────────────────────
+# ── Stock universe (BSE tickers via yfinance .BO suffix; .NS fallback) ─────────
 WATCHLIST: dict[str, str] = {
     "RELIANCE.BO": "Reliance",
     "TCS.BO": "TCS",
@@ -72,10 +73,9 @@ WATCHLIST: dict[str, str] = {
 NIFTY_TICKER  = "^NSEI"
 SENSEX_TICKER = "^BSESN"
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# ── Signal constants ───────────────────────────────────────────────────────────
 RSI_OVERSOLD          = 38
 RSI_OVERBOUGHT        = 62
-MIN_CONFIDENCE        = 55   # only show picks at/above this
 ATR_MULTIPLIER_TARGET = 1.5
 ATR_MULTIPLIER_SL     = 1.0
 
@@ -125,7 +125,6 @@ def fetch_with_fallback(base: str, period: str, interval: str,
         df = safe_download(stem + suffix, period, interval)
         if not df.empty and len(df) >= min_rows:
             return df, suffix
-    # last resort — whatever exists
     for suffix in (".BO", ".NS"):
         df = safe_download(stem + suffix, period, interval)
         if not df.empty:
@@ -178,12 +177,13 @@ def ema_series(series: pd.Series, span: int) -> pd.Series:
     return _squeeze(series).ewm(span=span, adjust=False).mean()
 
 
-# ── Core signal scorer ─────────────────────────────────────────────────────────
+# ── Core signal scorer — always returns BUY or SELL (never WATCH) ─────────────
 
 def generate_signal(df: pd.DataFrame) -> dict:
     """
-    Score based on RSI, MACD, EMA trend, ATR for SL/target.
-    Returns dict: signal, confidence, last_price, target, stop_loss, atr.
+    Confluence scoring on RSI, MACD, EMA trend, momentum.
+    Always returns BUY or SELL (never neutral) so every stock gets a prediction.
+    Includes ATR-based target and stop-loss.
     """
     close      = _squeeze(df["Close"])
     last_price = float(close.iloc[-1])
@@ -215,47 +215,44 @@ def generate_signal(df: pd.DataFrame) -> dict:
     if mom > 1.0:  score += 1
     elif mom < -1.0: score -= 1
 
-    if score >= 3:
+    # Always force a directional call — no WATCH
+    if score >= 0:
         signal = "BUY"
-    elif score <= -3:
-        signal = "SELL"
-    elif score == 2:
-        signal = "BUY"
-    elif score == -2:
-        signal = "SELL"
     else:
-        signal = "WATCH"
+        signal = "SELL"
 
-    # Honest confidence
+    # Confidence: stronger alignment = higher confidence
     factors_hit = sum([
         abs(rsi - 50) > 12,
         macd_l != 0,
         trend_bull or trend_bear,
         abs(mom) > 0.5,
     ])
-    confidence = min(78, 48 + factors_hit * 7)
-    if signal == "WATCH":
-        confidence = 40
+    confidence = min(90, 50 + factors_hit * 10)
 
     # ATR-based stop loss and target
-    if atr > 0:
+    if atr > 0 and last_price > 0:
         if signal == "BUY":
             target    = round(last_price + ATR_MULTIPLIER_TARGET * atr, 2)
             stop_loss = round(last_price - ATR_MULTIPLIER_SL     * atr, 2)
-        elif signal == "SELL":
+        else:
             target    = round(last_price - ATR_MULTIPLIER_TARGET * atr, 2)
             stop_loss = round(last_price + ATR_MULTIPLIER_SL     * atr, 2)
-        else:
-            target = stop_loss = last_price
     else:
         if signal == "BUY":
             target    = round(last_price * 1.020, 2)
             stop_loss = round(last_price * 0.985, 2)
-        elif signal == "SELL":
+        else:
             target    = round(last_price * 0.980, 2)
             stop_loss = round(last_price * 1.015, 2)
-        else:
-            target = stop_loss = last_price
+
+    # Sanity: ensure SL < target for BUY, SL > target for SELL
+    if signal == "BUY" and stop_loss >= target:
+        stop_loss = round(last_price * 0.985, 2)
+        target    = round(last_price * 1.020, 2)
+    if signal == "SELL" and stop_loss <= target:
+        stop_loss = round(last_price * 1.015, 2)
+        target    = round(last_price * 0.980, 2)
 
     return {
         "signal":     signal,
@@ -265,21 +262,16 @@ def generate_signal(df: pd.DataFrame) -> dict:
         "stop_loss":  stop_loss,
         "atr":        atr,
         "rsi":        rsi,
+        "score":      score,
     }
 
 
 # ── Hold-time estimator ────────────────────────────────────────────────────────
 
 def hold_time(report_type: str, atr: float, price: float) -> str:
-    """
-    Estimate realistic hold time.
-    - Pre-market  → daily picks: 1-5 days
-    - Intraday    → 30 min – 3 hrs
-    - Post-market → reference only (positions held overnight)
-    """
+    """Realistic hold time estimate based on volatility."""
+    atr_pct = (atr / price * 100) if price > 0 else 1.5
     if report_type == "intraday":
-        # Volatility-adjusted intraday hold: low ATR% → shorter
-        atr_pct = (atr / price * 100) if price > 0 else 1.0
         if atr_pct > 2.0:
             return "30–60 min"
         elif atr_pct > 1.0:
@@ -287,8 +279,6 @@ def hold_time(report_type: str, atr: float, price: float) -> str:
         else:
             return "2–3 hrs"
     else:
-        # Daily picks: ATR drives how many sessions
-        atr_pct = (atr / price * 100) if price > 0 else 1.5
         if atr_pct > 3.0:
             return "1–2 days"
         elif atr_pct > 1.5:
@@ -298,16 +288,14 @@ def hold_time(report_type: str, atr: float, price: float) -> str:
 
 
 def max_profit_time(report_type: str) -> str:
-    """Return the clock window by which target is likely hit."""
+    """Clock window by which target is likely hit."""
     if report_type == "intraday":
-        # Next 1-3 hrs during market hours
         n = now_ist()
         target_hr = n + timedelta(hours=2)
         if target_hr.time() > MARKET_CLOSE:
             return "before 3:30 PM"
         return target_hr.strftime("%I:%M %p")
     else:
-        # Day picks aim for next 2-3 sessions
         return "2–3 trading sessions"
 
 
@@ -317,140 +305,127 @@ def fmt_money(v: float) -> str:
     return f"₹{v:,.2f}"
 
 
-def build_pre_market_report(force_send: bool = False) -> str:
-    """9:00 AM IST — daily BUY/SELL picks for today's session."""
-    today_str = ist_today().strftime("%d %b %Y")  # e.g. 27 Nov 2026
+def build_pre_market_report() -> str:
+    """9:00 AM IST — daily BUY/SELL picks. ALWAYS sends predictions."""
+    today_str = ist_today().strftime("%d %b %Y")
     header    = f"📈 <b>BSE RADAR — {today_str}</b>\n"
 
-    buy_picks  = []
-    sell_picks = []
-
+    ranked = []
     for ticker, name in WATCHLIST.items():
         try:
             df, _ = fetch_with_fallback(ticker, "60d", "1d", min_rows=25)
             if df.empty or len(df) < 25:
                 continue
             info = generate_signal(df)
-            if info["signal"] in ("BUY",) and info["confidence"] >= MIN_CONFIDENCE:
-                buy_picks.append((ticker, name, info))
-            elif info["signal"] in ("SELL",) and info["confidence"] >= MIN_CONFIDENCE:
-                sell_picks.append((ticker, name, info))
+            ranked.append((ticker, name, info))
         except Exception as exc:
             log.warning("Signal error %s: %s", ticker, exc)
 
-    buy_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
-    sell_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
+    # Sort by confidence desc, then by score magnitude
+    ranked.sort(key=lambda x: (x[2]["confidence"], abs(x[2]["score"])), reverse=True)
 
     lines = [header]
 
-    if not buy_picks and not sell_picks:
-        if force_send:
-            lines.append("⚪ No strong signals today. Market is neutral — wait.")
-        else:
-            log.info("No strong signals today — nothing to send (pre-market).")
-            return ""
-        lines.append("")
-        lines.append("📌 <i>Not SEBI-registered advice. Do your own research.</i>")
-        return "\n".join(lines)
-
-    # ── BUY picks ──
-    if buy_picks:
-        lines.append("🟢 <b>BUY TODAY</b>")
-        for i, (ticker, name, info) in enumerate(buy_picks[:6], 1):
-            hold = hold_time("pre", info["atr"], info["last_price"])
-            mpt  = max_profit_time("pre")
-            lines.append(
-                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
-                f"   🟢 BUY | Hold: {hold} | Target by: {mpt}\n"
-                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
-            )
-        lines.append("")
-
-    # ── SELL picks ──
-    if sell_picks:
-        lines.append("🔴 <b>SELL / SHORT TODAY</b>")
-        for i, (ticker, name, info) in enumerate(sell_picks[:4], 1):
-            hold = hold_time("pre", info["atr"], info["last_price"])
-            mpt  = max_profit_time("pre")
-            lines.append(
-                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
-                f"   🔴 SELL | Hold: {hold} | Target by: {mpt}\n"
-                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
-            )
-        lines.append("")
-
-    lines.append("📌 <i>Not SEBI-registered advice. Do your own research.</i>")
-    return "\n".join(lines)
-
-
-def build_intraday_report(force_send: bool = False) -> str:
-    """Every 30 min during market hours — live intraday signals."""
-    now_str   = now_ist().strftime("%I:%M %p")
-    today_str = ist_today().strftime("%d %b %Y")
-    header    = f"⚡ <b>INTRADAY RADAR — {today_str} {now_str} IST</b>\n"
-
-    buy_picks  = []
-    sell_picks = []
-
-    for ticker, name in WATCHLIST.items():
-        try:
-            # 5-min candles over last 5 days; need >= 40 bars for indicators
-            df, _ = fetch_with_fallback(ticker, "5d", "5m", min_rows=40)
-            if df.empty or len(df) < 40:
-                continue
-            info = generate_signal(df)
-            if info["signal"] == "BUY" and info["confidence"] >= MIN_CONFIDENCE:
-                buy_picks.append((ticker, name, info))
-            elif info["signal"] == "SELL" and info["confidence"] >= MIN_CONFIDENCE:
-                sell_picks.append((ticker, name, info))
-        except Exception as exc:
-            log.warning("Intraday signal error %s: %s", ticker, exc)
-
-    buy_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
-    sell_picks.sort(key=lambda x: x[1]["confidence"], reverse=True)
-
-    lines = [header]
-
-    if not buy_picks and not sell_picks:
-        if force_send:
-            lines.append("⚪ No intraday signals right now. Market quiet.")
-        else:
-            log.info("No intraday signals — nothing to send.")
-            return ""
+    if not ranked:
+        lines.append("⚪ No market data available today.")
         lines.append("")
         lines.append("📌 <i>Not SEBI-registered advice.</i>")
         return "\n".join(lines)
 
-    if buy_picks:
-        lines.append("🟢 <b>BUY NOW (Intraday)</b>")
-        for i, (ticker, name, info) in enumerate(buy_picks[:5], 1):
-            hold = hold_time("intraday", info["atr"], info["last_price"])
-            mpt  = max_profit_time("intraday")
+    # Split into BUY and SELL groups
+    buys  = [r for r in ranked if r[2]["signal"] == "BUY"]
+    sells = [r for r in ranked if r[2]["signal"] == "SELL"]
+
+    if buys:
+        lines.append("🟢 <b>BUY TODAY</b>")
+        for i, (ticker, name, info) in enumerate(buys[:6], 1):
+            hold = hold_time("pre", info["atr"], info["last_price"])
+            mpt  = max_profit_time("pre")
             lines.append(
                 f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
-                f"   🟢 BUY | Hold: {hold} | Target by: {mpt}\n"
+                f"   🟢 BUY | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
                 f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
             )
         lines.append("")
 
-    if sell_picks:
-        lines.append("🔴 <b>SELL NOW (Intraday)</b>")
-        for i, (ticker, name, info) in enumerate(sell_picks[:4], 1):
-            hold = hold_time("intraday", info["atr"], info["last_price"])
-            mpt  = max_profit_time("intraday")
+    if sells:
+        lines.append("🔴 <b>SELL TODAY</b>")
+        for i, (ticker, name, info) in enumerate(sells[:4], 1):
+            hold = hold_time("pre", info["atr"], info["last_price"])
+            mpt  = max_profit_time("pre")
             lines.append(
                 f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
-                f"   🔴 SELL | Hold: {hold} | Target by: {mpt}\n"
+                f"   🔴 SELL | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
                 f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
             )
         lines.append("")
 
-    lines.append("📌 <i>Not SEBI-registered advice.</i>")
+    lines.append("📊 Data: Real BSE/NSE prices (yfinance) · ATR-based targets & SL")
+    lines.append("📌 <i>Not SEBI-registered investment advice. Trade at your own risk.</i>")
     return "\n".join(lines)
 
 
-def build_post_market_report(force_send: bool = False) -> str:
-    """4:00 PM IST — day summary: top gainers/losers from watchlist."""
+def build_intraday_report() -> str:
+    """Every 10 min during market hours — live intraday signals. ALWAYS sends."""
+    now_str   = now_ist().strftime("%I:%M %p")
+    today_str = ist_today().strftime("%d %b %Y")
+    header    = f"⚡ <b>INTRADAY RADAR — {today_str} {now_str} IST</b>\n"
+
+    ranked = []
+    for ticker, name in WATCHLIST.items():
+        try:
+            df, _ = fetch_with_fallback(ticker, "5d", "5m", min_rows=40)
+            if df.empty or len(df) < 40:
+                continue
+            info = generate_signal(df)
+            ranked.append((ticker, name, info))
+        except Exception as exc:
+            log.warning("Intraday signal error %s: %s", ticker, exc)
+
+    ranked.sort(key=lambda x: (x[2]["confidence"], abs(x[2]["score"])), reverse=True)
+
+    lines = [header]
+
+    if not ranked:
+        lines.append("⚪ No intraday data available right now.")
+        lines.append("")
+        lines.append("📌 <i>Not SEBI-registered advice.</i>")
+        return "\n".join(lines)
+
+    buys  = [r for r in ranked if r[2]["signal"] == "BUY"]
+    sells = [r for r in ranked if r[2]["signal"] == "SELL"]
+
+    if buys:
+        lines.append("🟢 <b>BUY NOW (Intraday)</b>")
+        for i, (ticker, name, info) in enumerate(buys[:5], 1):
+            hold = hold_time("intraday", info["atr"], info["last_price"])
+            mpt  = max_profit_time("intraday")
+            lines.append(
+                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
+                f"   🟢 BUY | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
+                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
+            )
+        lines.append("")
+
+    if sells:
+        lines.append("🔴 <b>SELL NOW (Intraday)</b>")
+        for i, (ticker, name, info) in enumerate(sells[:4], 1):
+            hold = hold_time("intraday", info["atr"], info["last_price"])
+            mpt  = max_profit_time("intraday")
+            lines.append(
+                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
+                f"   🔴 SELL | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
+                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
+            )
+        lines.append("")
+
+    lines.append("📊 Data: Real BSE/NSE 5-min prices (yfinance)")
+    lines.append("📌 <i>Not SEBI-registered investment advice.</i>")
+    return "\n".join(lines)
+
+
+def build_post_market_report() -> str:
+    """3:45 PM IST — day summary: top gainers/losers. ALWAYS sends."""
     today_str = ist_today().strftime("%d %b %Y")
     header    = f"🔔 <b>BSE CLOSE — {today_str}</b>\n"
 
@@ -464,30 +439,28 @@ def build_post_market_report(force_send: bool = False) -> str:
             prev  = float(close.iloc[-2])
             last  = float(close.iloc[-1])
             chg   = (last - prev) / prev * 100 if prev else 0.0
-            results.append({"name": name, "last": last, "prev": prev, "chg": chg})
+            results.append({"name": name, "ticker": ticker, "last": last, "prev": prev, "chg": chg})
         except Exception as exc:
             log.warning("Post-market error %s: %s", ticker, exc)
 
-    gainers = sorted([r for r in results if r["chg"] > 0],
-                     key=lambda x: x["chg"], reverse=True)[:5]
-    losers  = sorted([r for r in results if r["chg"] < 0],
-                     key=lambda x: x["chg"])[:5]
+    results.sort(key=lambda x: x["chg"], reverse=True)
 
     lines = [header]
 
-    if not gainers and not losers:
-        if force_send:
-            lines.append("⚪ No data available for today.")
-            lines.append("")
-        else:
-            log.info("No post-market data — nothing to send.")
-            return ""
+    if not results:
+        lines.append("⚪ No market data available today.")
+        lines.append("")
+        lines.append("📌 <i>Not SEBI-registered advice.</i>")
+        return "\n".join(lines)
+
+    gainers = [r for r in results if r["chg"] > 0][:5]
+    losers  = [r for r in results if r["chg"] < 0][:5]
 
     if gainers:
         lines.append("📈 <b>TOP GAINERS</b>")
         for i, r in enumerate(gainers, 1):
             lines.append(
-                f"{i}. <b>{r['name']}</b>  ₹{r['last']:,.2f}  <b>+{r['chg']:.1f}%</b>"
+                f"{i}. <b>{r['name']}</b> ({r['ticker']})  ₹{r['last']:,.2f}  <b>+{r['chg']:.1f}%</b>"
             )
         lines.append("")
 
@@ -495,13 +468,16 @@ def build_post_market_report(force_send: bool = False) -> str:
         lines.append("📉 <b>TOP LOSERS</b>")
         for i, r in enumerate(losers, 1):
             lines.append(
-                f"{i}. <b>{r['name']}</b>  ₹{r['last']:,.2f}  <b>{r['chg']:.1f}%</b>"
+                f"{i}. <b>{r['name']}</b> ({r['ticker']})  ₹{r['last']:,.2f}  <b>{r['chg']:.1f}%</b>"
             )
         lines.append("")
 
-    lines.append("📌 <i>Not SEBI-registered advice.</i>")
+    lines.append("📊 Data: Real BSE/NSE daily prices (yfinance)")
+    lines.append("📌 <i>Not SEBI-registered investment advice.</i>")
     return "\n".join(lines)
 
+
+# ── Telegram sender ────────────────────────────────────────────────────────────
 
 def send_telegram(message: str, bot_token: str, chat_ids: list[str]) -> None:
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -539,25 +515,21 @@ def main() -> None:
     log.info("IST time: %s | report_type=%s | chats=%d",
              now_ist().strftime("%Y-%m-%d %I:%M %p"), report_type, len(chat_ids))
 
-    force_send = os.environ.get("SEND_ALWAYS", "0").strip().lower() in ("1", "true", "yes")
-
     if report_type == "pre":
-        message = build_pre_market_report(force_send)
+        message = build_pre_market_report()
     elif report_type == "intraday":
-        # Only send if market is open (prevents ghost messages on holidays)
         if not is_market_open():
             log.info("Market closed right now — skipping intraday send.")
             return
-        message = build_intraday_report(force_send)
+        message = build_intraday_report()
     elif report_type == "post":
-        message = build_post_market_report(force_send)
+        message = build_post_market_report()
     else:
         log.error("Unknown REPORT_TYPE: %s (must be pre/intraday/post)", report_type)
         sys.exit(1)
 
-    # Don't send empty messages when there are no signals and force_send is off
     if not message:
-        log.info("No signals to report — nothing to send.")
+        log.info("Empty report — nothing to send.")
         return
 
     try:
