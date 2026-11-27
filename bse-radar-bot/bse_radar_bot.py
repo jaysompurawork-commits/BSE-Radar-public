@@ -332,9 +332,9 @@ def build_pre_market_report() -> str:
                 continue
             info = generate_signal(df)
             if info["signal"] in ("BUY",) and info["confidence"] >= MIN_CONFIDENCE:
-                buy_picks.append((name, info))
+                buy_picks.append((ticker, name, info))
             elif info["signal"] in ("SELL",) and info["confidence"] >= MIN_CONFIDENCE:
-                sell_picks.append((name, info))
+                sell_picks.append((ticker, name, info))
         except Exception as exc:
             log.warning("Signal error %s: %s", ticker, exc)
 
@@ -352,11 +352,11 @@ def build_pre_market_report() -> str:
     # ── BUY picks ──
     if buy_picks:
         lines.append("🟢 <b>BUY TODAY</b>")
-        for i, (name, info) in enumerate(buy_picks[:6], 1):
+        for i, (ticker, name, info) in enumerate(buy_picks[:6], 1):
             hold = hold_time("pre", info["atr"], info["last_price"])
             mpt  = max_profit_time("pre")
             lines.append(
-                f"{i}. <b>{name}</b>  ₹{info['last_price']:,.2f}\n"
+                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
                 f"   🟢 BUY | Hold: {hold} | Target by: {mpt}\n"
                 f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
             )
@@ -365,11 +365,11 @@ def build_pre_market_report() -> str:
     # ── SELL picks ──
     if sell_picks:
         lines.append("🔴 <b>SELL / SHORT TODAY</b>")
-        for i, (name, info) in enumerate(sell_picks[:4], 1):
+        for i, (ticker, name, info) in enumerate(sell_picks[:4], 1):
             hold = hold_time("pre", info["atr"], info["last_price"])
             mpt  = max_profit_time("pre")
             lines.append(
-                f"{i}. <b>{name}</b>  ₹{info['last_price']:,.2f}\n"
+                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
                 f"   🔴 SELL | Hold: {hold} | Target by: {mpt}\n"
                 f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
             )
@@ -396,9 +396,9 @@ def build_intraday_report() -> str:
                 continue
             info = generate_signal(df)
             if info["signal"] == "BUY" and info["confidence"] >= MIN_CONFIDENCE:
-                buy_picks.append((name, info))
+                buy_picks.append((ticker, name, info))
             elif info["signal"] == "SELL" and info["confidence"] >= MIN_CONFIDENCE:
-                sell_picks.append((name, info))
+                sell_picks.append((ticker, name, info))
         except Exception as exc:
             log.warning("Intraday signal error %s: %s", ticker, exc)
 
@@ -415,11 +415,11 @@ def build_intraday_report() -> str:
 
     if buy_picks:
         lines.append("🟢 <b>BUY NOW (Intraday)</b>")
-        for i, (name, info) in enumerate(buy_picks[:5], 1):
+        for i, (ticker, name, info) in enumerate(buy_picks[:5], 1):
             hold = hold_time("intraday", info["atr"], info["last_price"])
             mpt  = max_profit_time("intraday")
             lines.append(
-                f"{i}. <b>{name}</b>  ₹{info['last_price']:,.2f}\n"
+                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
                 f"   🟢 BUY | Hold: {hold} | Target by: {mpt}\n"
                 f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
             )
@@ -427,11 +427,11 @@ def build_intraday_report() -> str:
 
     if sell_picks:
         lines.append("🔴 <b>SELL NOW (Intraday)</b>")
-        for i, (name, info) in enumerate(sell_picks[:4], 1):
+        for i, (ticker, name, info) in enumerate(sell_picks[:4], 1):
             hold = hold_time("intraday", info["atr"], info["last_price"])
             mpt  = max_profit_time("intraday")
             lines.append(
-                f"{i}. <b>{name}</b>  ₹{info['last_price']:,.2f}\n"
+                f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
                 f"   🔴 SELL | Hold: {hold} | Target by: {mpt}\n"
                 f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
             )
