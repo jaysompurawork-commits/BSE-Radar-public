@@ -1,6 +1,6 @@
 """
-BSE Radar Bot — Production v4.0
-Always sends daily predictions to Telegram.
+BSE Radar Bot — Production v5.0
+Always sends daily predictions to Telegram with enhanced accuracy helpers.
 
 Schedule (IST):
   - Pre-market :  9:00 AM  → daily BUY/SELL picks (always sends)
@@ -9,7 +9,7 @@ Schedule (IST):
 
 Message format (every pick):
   Stock Name (TICKER.BO) | ₹Price | BUY/SELL | Hold: X | Target by: HH:MM
-  🎯 Target: ₹X  |  🛑 SL: ₹X
+  🎯 Target: ₹X  |  🛑 SL: ₹X  |  Conf: XX%
 
 Env vars required:
   TELEGRAM_BOT_TOKEN  — bot token from @BotFather
@@ -74,10 +74,13 @@ NIFTY_TICKER  = "^NSEI"
 SENSEX_TICKER = "^BSESN"
 
 # ── Signal constants ───────────────────────────────────────────────────────────
-RSI_OVERSOLD          = 38
-RSI_OVERBOUGHT        = 62
+RSI_OVERSOLD          = 35
+RSI_OVERBOUGHT        = 65
+VOLUME_SURGE_MIN      = 1.15   # volume must be >= 1.15x avg to confirm
+MOMENTUM_STRONG       = 0.8    # % change over 5 days to count as strong
 ATR_MULTIPLIER_TARGET = 1.5
 ATR_MULTIPLIER_SL     = 1.0
+MIN_CONFIDENCE_SHOW   = 50     # minimum confidence to include a pick
 
 # Market hours in IST
 MARKET_OPEN  = dtime(9, 15)
@@ -177,13 +180,156 @@ def ema_series(series: pd.Series, span: int) -> pd.Series:
     return _squeeze(series).ewm(span=span, adjust=False).mean()
 
 
-# ── Core signal scorer — always returns BUY or SELL (never WATCH) ─────────────
+def volume_ratio(df: pd.DataFrame, lookback: int = 10) -> float:
+    """Last bar volume vs N-bar average. 1.0 on failure."""
+    if "Volume" not in df.columns or len(df) < lookback + 1:
+        return 1.0
+    vol = _squeeze(df["Volume"])
+    avg = float(vol.iloc[-(lookback + 1):-1].mean())
+    last = float(vol.iloc[-1])
+    if avg == 0 or np.isnan(avg):
+        return 1.0
+    return float(last / avg)
 
-def generate_signal(df: pd.DataFrame) -> dict:
+
+def price_momentum(close: pd.Series, days: int = 5) -> float:
+    """% change over last N days. 0.0 on failure."""
+    close = _squeeze(close)
+    if len(close) < days + 1:
+        return 0.0
+    old = close.iloc[-(days + 1)]
+    new = close.iloc[-1]
+    if old == 0 or np.isnan(old):
+        return 0.0
+    return float((new - old) / old * 100)
+
+
+def bb_position(df: pd.DataFrame, period: int = 20) -> tuple[float, float]:
+    """Return (bb_position_0_to_1, bandwidth_pct). 0=lower band, 1=upper band."""
+    if len(df) < period + 1 or not {"High", "Low", "Close"}.issubset(df.columns):
+        return 0.5, 0.0
+    close = _squeeze(df["Close"])
+    ma = close.rolling(window=period).mean()
+    std = close.rolling(window=period).std()
+    upper = ma + 2 * std
+    lower = ma - 2 * std
+    last_close = close.iloc[-1]
+    last_upper = upper.iloc[-1]
+    last_lower = lower.iloc[-1]
+    width = last_upper - last_lower
+    if width == 0 or np.isnan(width):
+        return 0.5, 0.0
+    pos = (last_close - last_lower) / width
+    bandwidth = (width / last_close) * 100 if last_close > 0 else 0.0
+    return float(pos), float(bandwidth)
+
+
+def vwap_confirm(df: pd.DataFrame) -> bool:
+    """Return True if last close is above VWAP (bullish)."""
+    if len(df) < 10 or not {"High", "Low", "Close", "Volume"}.issubset(df.columns):
+        return False
+    close = _squeeze(df["Close"])
+    high = _squeeze(df["High"])
+    low = _squeeze(df["Low"])
+    volume = _squeeze(df["Volume"])
+    typical_price = (high + low + close) / 3
+    vwap = (typical_price * volume).cumsum() / volume.cumsum()
+    return bool(close.iloc[-1] > vwap.iloc[-1])
+
+
+def support_resistance(df: pd.DataFrame, lookback: int = 20) -> tuple[float, float]:
+    """Return (nearest_support, nearest_resistance) from recent swing lows/highs."""
+    if len(df) < lookback:
+        return 0.0, 0.0
+    high = _squeeze(df["High"])
+    low  = _squeeze(df["Low"])
+    close = _squeeze(df["Close"])
+    recent_highs = high.tail(lookback)
+    recent_lows  = low.tail(lookback)
+    # Simple swing points: local maxima/minima
+    resistance = float(recent_highs.max())
+    support    = float(recent_lows.min())
+    last_price = float(close.iloc[-1])
+    # Find nearest support below price, nearest resistance above price
+    below = [l for l in recent_lows if l < last_price]
+    above = [h for h in recent_highs if h > last_price]
+    support = max(below) if below else support
+    resistance = min(above) if above else resistance
+    return support, resistance
+
+
+def get_multi_timeframe_bias(ticker: str) -> tuple[float, str]:
+    """Return (bias_score, bias_text) from EMA200 (weekly proxy) + EMA50 (daily).
+    Uses daily data only to avoid yfinance 1wk dividend errors on .BO tickers."""
+    try:
+        # Longer daily series as weekly-proxy trend
+        df_long, _ = fetch_with_fallback(ticker, "1y", "1d", min_rows=200)
+        if df_long.empty or len(df_long) < 200:
+            return 0.0, "Neutral"
+        close_l = _squeeze(df_long["Close"])
+        ema200 = float(ema_series(close_l, 200).iloc[-1])
+        weekly_bullish = float(close_l.iloc[-1]) > ema200
+
+        # Daily trend vs EMA50
+        df_d, _ = fetch_with_fallback(ticker, "60d", "1d", min_rows=50)
+        if df_d.empty or len(df_d) < 50:
+            return 0.0, "Neutral"
+        close_d = _squeeze(df_d["Close"])
+        ema50_d = float(ema_series(close_d, 50).iloc[-1])
+        daily_bullish = float(close_d.iloc[-1]) > ema50_d
+
+        if weekly_bullish and daily_bullish:
+            return 1.0, "Strongly Bullish"
+        if weekly_bullish:
+            return 0.5, "Bullish"
+        if not weekly_bullish and not daily_bullish:
+            return -1.0, "Strongly Bearish"
+        if not weekly_bullish:
+            return -0.5, "Bearish"
+        return 0.0, "Neutral"
+    except Exception as exc:
+        log.warning("Multi-timeframe bias failed for %s: %s", ticker, exc)
+        return 0.0, "Neutral"
+
+
+def get_market_regime() -> tuple[float, str]:
+    """Return (regime_score, regime_text) from NIFTY + SENSEX trend."""
+    try:
+        nifty_df, _ = safe_download(NIFTY_TICKER, "60d", "1d"), ""
+        sensex_df, _ = safe_download(SENSEX_TICKER, "60d", "1d"), ""
+        score = 0
+        if not nifty_df.empty and len(nifty_df) >= 50:
+            n_close = _squeeze(nifty_df["Close"])
+            n_ema50 = float(ema_series(n_close, 50).iloc[-1])
+            if float(n_close.iloc[-1]) > n_ema50:
+                score += 1
+            else:
+                score -= 1
+        if not sensex_df.empty and len(sensex_df) >= 50:
+            s_close = _squeeze(sensex_df["Close"])
+            s_ema50 = float(ema_series(s_close, 50).iloc[-1])
+            if float(s_close.iloc[-1]) > s_ema50:
+                score += 1
+            else:
+                score -= 1
+        if score >= 1:
+            return 1.0, "Bullish"
+        if score <= -1:
+            return -1.0, "Bearish"
+        return 0.0, "Neutral"
+    except Exception as exc:
+        log.warning("Market regime failed: %s", exc)
+        return 0.0, "Neutral"
+
+
+# ── Core signal scorer — always returns BUY or SELL ────────────────────────────
+
+def generate_signal(df: pd.DataFrame, ticker: str = "") -> dict:
     """
-    Confluence scoring on RSI, MACD, EMA trend, momentum.
+    Enhanced confluence scoring with: RSI, MACD, EMA trend, volume, momentum,
+    Bollinger Bands, VWAP, support/resistance, multi-timeframe bias, market regime.
     Always returns BUY or SELL (never neutral) so every stock gets a prediction.
-    Includes ATR-based target and stop-loss.
+    Includes ATR-based target and stop-loss, plus risk/reward ratio.
     """
     close      = _squeeze(df["Close"])
     last_price = float(close.iloc[-1])
@@ -198,37 +344,59 @@ def generate_signal(df: pd.DataFrame) -> dict:
     trend_bull = ema20 > ema50
     trend_bear = ema20 < ema50
 
-    # 5-day momentum
-    mom = 0.0
-    if len(close) >= 6:
-        old = float(close.iloc[-6])
-        if old > 0:
-            mom = (last_price - old) / old * 100
+    mom = price_momentum(close, days=5)
+    vol = volume_ratio(df)
+    bb_pos, bb_width = bb_position(df)
+    vwap_bull = vwap_confirm(df)
+    support, resistance = support_resistance(df)
+    bias_score, bias_text = get_multi_timeframe_bias(ticker) if ticker else (0.0, "Neutral")
 
-    score = 0
+    score = 0  # -6 to +6
+
+    # RSI
     if rsi < RSI_OVERSOLD:   score += 2
     elif rsi > RSI_OVERBOUGHT: score -= 2
+
+    # MACD
     if macd_bull:  score += 1
     else:          score -= 1
+
+    # EMA trend
     if trend_bull: score += 1
     elif trend_bear: score -= 1
-    if mom > 1.0:  score += 1
-    elif mom < -1.0: score -= 1
+
+    # Momentum
+    if mom > MOMENTUM_STRONG:  score += 1
+    elif mom < -MOMENTUM_STRONG: score -= 1
+
+    # Bollinger Bands position
+    if bb_pos > 0.5:  score += 1
+    else:             score -= 1
+
+    # Volume confirms direction (not standalone, adds weight)
+    if vol >= VOLUME_SURGE_MIN:
+        score += 0 if score < 0 else 1  # volume amplifies existing direction
+
+    # Multi-timeframe bias
+    if bias_score >= 0.5:   score += 1
+    elif bias_score <= -0.5: score -= 1
 
     # Always force a directional call — no WATCH
-    if score >= 0:
-        signal = "BUY"
-    else:
-        signal = "SELL"
+    signal = "BUY" if score >= 0 else "SELL"
 
-    # Confidence: stronger alignment = higher confidence
+    # Confidence: stronger alignment = higher confidence (capped at 90)
     factors_hit = sum([
-        abs(rsi - 50) > 12,
+        abs(rsi - 50) > 15,
         macd_l != 0,
         trend_bull or trend_bear,
         abs(mom) > 0.5,
+        vol >= VOLUME_SURGE_MIN,
+        abs(bb_pos - 0.5) > 0.3,
+        abs(bias_score) >= 0.5,
     ])
-    confidence = min(90, 50 + factors_hit * 10)
+    confidence = min(90, 45 + factors_hit * 6)
+    if abs(bias_score) >= 1.0:
+        confidence = min(90, confidence + 5)
 
     # ATR-based stop loss and target
     if atr > 0 and last_price > 0:
@@ -254,6 +422,11 @@ def generate_signal(df: pd.DataFrame) -> dict:
         stop_loss = round(last_price * 1.015, 2)
         target    = round(last_price * 0.980, 2)
 
+    # Risk/reward ratio
+    risk   = abs(last_price - stop_loss)
+    reward = abs(target - last_price)
+    rr_ratio = round(reward / risk, 2) if risk > 0 else 0.0
+
     return {
         "signal":     signal,
         "confidence": confidence,
@@ -263,6 +436,13 @@ def generate_signal(df: pd.DataFrame) -> dict:
         "atr":        atr,
         "rsi":        rsi,
         "score":      score,
+        "vol_ratio":  vol,
+        "bb_pos":     round(bb_pos, 2),
+        "vwap_bull":  vwap_bull,
+        "bias":       bias_text,
+        "rr_ratio":   rr_ratio,
+        "support":    round(support, 2) if support > 0 else 0.0,
+        "resistance": round(resistance, 2) if resistance > 0 else 0.0,
     }
 
 
@@ -310,13 +490,17 @@ def build_pre_market_report() -> str:
     today_str = ist_today().strftime("%d %b %Y")
     header    = f"📈 <b>BSE RADAR — {today_str}</b>\n"
 
+    regime_score, regime_text = get_market_regime()
+    regime_emoji = "📈" if regime_score > 0 else ("📉" if regime_score < 0 else "↔️")
+    header += f"{regime_emoji} Market: {regime_text}\n"
+
     ranked = []
     for ticker, name in WATCHLIST.items():
         try:
             df, _ = fetch_with_fallback(ticker, "60d", "1d", min_rows=25)
             if df.empty or len(df) < 25:
                 continue
-            info = generate_signal(df)
+            info = generate_signal(df, ticker)
             ranked.append((ticker, name, info))
         except Exception as exc:
             log.warning("Signal error %s: %s", ticker, exc)
@@ -344,7 +528,7 @@ def build_pre_market_report() -> str:
             lines.append(
                 f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
                 f"   🟢 BUY | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
-                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
+                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}  |  R/R: {info['rr_ratio']}"
             )
         lines.append("")
 
@@ -356,7 +540,7 @@ def build_pre_market_report() -> str:
             lines.append(
                 f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
                 f"   🔴 SELL | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
-                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
+                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}  |  R/R: {info['rr_ratio']}"
             )
         lines.append("")
 
@@ -377,7 +561,7 @@ def build_intraday_report() -> str:
             df, _ = fetch_with_fallback(ticker, "5d", "5m", min_rows=40)
             if df.empty or len(df) < 40:
                 continue
-            info = generate_signal(df)
+            info = generate_signal(df, ticker)
             ranked.append((ticker, name, info))
         except Exception as exc:
             log.warning("Intraday signal error %s: %s", ticker, exc)
@@ -403,7 +587,7 @@ def build_intraday_report() -> str:
             lines.append(
                 f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
                 f"   🟢 BUY | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
-                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
+                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}  |  R/R: {info['rr_ratio']}"
             )
         lines.append("")
 
@@ -415,7 +599,7 @@ def build_intraday_report() -> str:
             lines.append(
                 f"{i}. <b>{name}</b> ({ticker})  ₹{info['last_price']:,.2f}\n"
                 f"   🔴 SELL | Conf: {info['confidence']}% | Hold: {hold} | Target by: {mpt}\n"
-                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}"
+                f"   🎯 Target: {fmt_money(info['target'])}  |  🛑 SL: {fmt_money(info['stop_loss'])}  |  R/R: {info['rr_ratio']}"
             )
         lines.append("")
 
