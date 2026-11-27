@@ -21,6 +21,11 @@ on:
           - pre
           - intraday
           - post
+      send_always:
+        description: 'Send even when there are no signals (test mode)'
+        required: false
+        default: 'false'
+        type: boolean
 
 jobs:
   # ──────────────────────────────────────────────────────────────────────────
@@ -47,6 +52,7 @@ jobs:
           TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_TYPE: pre
+          SEND_ALWAYS: ${{ github.event.inputs.send_always }}
         run: python bse-radar-bot/bse_radar_bot.py
 
   # ──────────────────────────────────────────────────────────────────────────
@@ -73,6 +79,7 @@ jobs:
           TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_TYPE: intraday
+          SEND_ALWAYS: ${{ github.event.inputs.send_always }}
         run: python bse-radar-bot/bse_radar_bot.py
 
   # ──────────────────────────────────────────────────────────────────────────
@@ -99,4 +106,5 @@ jobs:
           TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_TYPE: post
+          SEND_ALWAYS: ${{ github.event.inputs.send_always }}
         run: python bse-radar-bot/bse_radar_bot.py

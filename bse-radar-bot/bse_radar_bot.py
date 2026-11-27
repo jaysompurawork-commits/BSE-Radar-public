@@ -539,7 +539,7 @@ def main() -> None:
     log.info("IST time: %s | report_type=%s | chats=%d",
              now_ist().strftime("%Y-%m-%d %I:%M %p"), report_type, len(chat_ids))
 
-    force_send = os.environ.get("SEND_ALWAYS", "0").strip() == "1"
+    force_send = os.environ.get("SEND_ALWAYS", "0").strip().lower() in ("1", "true", "yes")
 
     if report_type == "pre":
         message = build_pre_market_report(force_send)
