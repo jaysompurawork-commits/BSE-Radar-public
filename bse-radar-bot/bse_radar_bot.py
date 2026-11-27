@@ -317,7 +317,7 @@ def fmt_money(v: float) -> str:
     return f"₹{v:,.2f}"
 
 
-def build_pre_market_report() -> str:
+def build_pre_market_report(force_send: bool = False) -> str:
     """9:00 AM IST — daily BUY/SELL picks for today's session."""
     today_str = ist_today().strftime("%d %b %Y")  # e.g. 27 Nov 2026
     header    = f"📈 <b>BSE RADAR — {today_str}</b>\n"
@@ -344,7 +344,11 @@ def build_pre_market_report() -> str:
     lines = [header]
 
     if not buy_picks and not sell_picks:
-        lines.append("⚪ No strong signals today. Market is neutral — wait.")
+        if force_send:
+            lines.append("⚪ No strong signals today. Market is neutral — wait.")
+        else:
+            log.info("No strong signals today — nothing to send (pre-market).")
+            return ""
         lines.append("")
         lines.append("📌 <i>Not SEBI-registered advice. Do your own research.</i>")
         return "\n".join(lines)
@@ -379,7 +383,7 @@ def build_pre_market_report() -> str:
     return "\n".join(lines)
 
 
-def build_intraday_report() -> str:
+def build_intraday_report(force_send: bool = False) -> str:
     """Every 30 min during market hours — live intraday signals."""
     now_str   = now_ist().strftime("%I:%M %p")
     today_str = ist_today().strftime("%d %b %Y")
@@ -408,7 +412,11 @@ def build_intraday_report() -> str:
     lines = [header]
 
     if not buy_picks and not sell_picks:
-        lines.append("⚪ No intraday signals right now. Market quiet.")
+        if force_send:
+            lines.append("⚪ No intraday signals right now. Market quiet.")
+        else:
+            log.info("No intraday signals — nothing to send.")
+            return ""
         lines.append("")
         lines.append("📌 <i>Not SEBI-registered advice.</i>")
         return "\n".join(lines)
@@ -441,7 +449,7 @@ def build_intraday_report() -> str:
     return "\n".join(lines)
 
 
-def build_post_market_report() -> str:
+def build_post_market_report(force_send: bool = False) -> str:
     """4:00 PM IST — day summary: top gainers/losers from watchlist."""
     today_str = ist_today().strftime("%d %b %Y")
     header    = f"🔔 <b>BSE CLOSE — {today_str}</b>\n"
@@ -467,6 +475,14 @@ def build_post_market_report() -> str:
 
     lines = [header]
 
+    if not gainers and not losers:
+        if force_send:
+            lines.append("⚪ No data available for today.")
+            lines.append("")
+        else:
+            log.info("No post-market data — nothing to send.")
+            return ""
+
     if gainers:
         lines.append("📈 <b>TOP GAINERS</b>")
         for i, r in enumerate(gainers, 1):
@@ -483,15 +499,9 @@ def build_post_market_report() -> str:
             )
         lines.append("")
 
-    if not gainers and not losers:
-        lines.append("⚪ No data available for today.")
-        lines.append("")
-
     lines.append("📌 <i>Not SEBI-registered advice.</i>")
     return "\n".join(lines)
 
-
-# ── Telegram sender ────────────────────────────────────────────────────────────
 
 def send_telegram(message: str, bot_token: str, chat_ids: list[str]) -> None:
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -529,16 +539,18 @@ def main() -> None:
     log.info("IST time: %s | report_type=%s | chats=%d",
              now_ist().strftime("%Y-%m-%d %I:%M %p"), report_type, len(chat_ids))
 
+    force_send = os.environ.get("SEND_ALWAYS", "0").strip() == "1"
+
     if report_type == "pre":
-        message = build_pre_market_report()
+        message = build_pre_market_report(force_send)
     elif report_type == "intraday":
         # Only send if market is open (prevents ghost messages on holidays)
         if not is_market_open():
             log.info("Market closed right now — skipping intraday send.")
             return
-        message = build_intraday_report()
+        message = build_intraday_report(force_send)
     elif report_type == "post":
-        message = build_post_market_report()
+        message = build_post_market_report(force_send)
     else:
         log.error("Unknown REPORT_TYPE: %s (must be pre/intraday/post)", report_type)
         sys.exit(1)
