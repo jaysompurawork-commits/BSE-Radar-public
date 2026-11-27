@@ -4,9 +4,8 @@ on:
   schedule:
     # Pre-market: 9:00 AM IST = 3:30 AM UTC (weekdays)
     - cron: '30 3 * * 1-5'
-    # Intraday: every 30 min, 9:30 AM–3:00 PM IST = 4:00–9:30 AM UTC (weekdays)
-    # GitHub Actions cron minimum is 5 min, but 30-min slots reduce queue delay.
-    - cron: '0,30 4-9 * * 1-5'
+    # Intraday: every 10 min, 9:30 AM–3:00 PM IST = 4:00–9:30 AM UTC (weekdays)
+    - cron: '*/10 4-9 * * 1-5'
     # Post-market: 3:45 PM IST = 10:15 AM UTC (gives 15 min after close for data to settle)
     - cron: '15 10 * * 1-5'
 

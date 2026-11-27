@@ -555,6 +555,11 @@ def main() -> None:
         log.error("Unknown REPORT_TYPE: %s (must be pre/intraday/post)", report_type)
         sys.exit(1)
 
+    # Don't send empty messages when there are no signals and force_send is off
+    if not message:
+        log.info("No signals to report — nothing to send.")
+        return
+
     try:
         send_telegram(message, bot_token, chat_ids)
     except Exception as exc:
