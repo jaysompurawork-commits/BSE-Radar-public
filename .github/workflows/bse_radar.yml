@@ -2,18 +2,18 @@ name: BSE Radar Bot
 
 on:
   schedule:
-    # Pre-market: 9:00 AM IST = 3:30 AM UTC — weekdays only
+    # Pre-market: 9:00 AM IST = 3:30 AM UTC (weekdays)
     - cron: '30 3 * * 1-5'
-    # Intraday updates: every 10 min during market hours (9:30 AM–3:00 PM IST = 4:00–9:30 AM UTC) — weekdays only
-    - cron: '*/10 4-9 * * 1-5'
-    # Post-market: 4:00 PM IST = 10:30 AM UTC — weekdays only
-    - cron: '30 10 * * 1-5'
+    # Intraday: every 30 min, 9:30 AM–3:00 PM IST = 4:00–9:30 AM UTC (weekdays)
+    # GitHub Actions cron minimum is 5 min, but 30-min slots reduce queue delay.
+    - cron: '0,30 4-9 * * 1-5'
+    # Post-market: 3:45 PM IST = 10:15 AM UTC (gives 15 min after close for data to settle)
+    - cron: '15 10 * * 1-5'
 
-  # Manual trigger from GitHub Actions tab
   workflow_dispatch:
     inputs:
       report_type:
-        description: 'Report type to send'
+        description: 'Report type'
         required: true
         default: 'pre'
         type: choice
@@ -23,89 +23,80 @@ on:
           - post
 
 jobs:
+  # ──────────────────────────────────────────────────────────────────────────
   pre-market:
-    name: Pre-Market Report (9:00 AM IST)
+    name: Pre-Market (9:00 AM IST)
     runs-on: ubuntu-latest
     if: |
       (github.event_name == 'schedule' && github.event.schedule == '30 3 * * 1-5') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'pre')
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
         run: pip install yfinance pandas numpy requests
 
-      - name: Run pre-market report
+      - name: Send pre-market report
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_TYPE: pre
-          GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python bse_radar_bot.py
+        run: python bse-radar-bot/bse_radar_bot.py
 
+  # ──────────────────────────────────────────────────────────────────────────
   intraday:
-    name: Intraday Update (every 10 min during market hours)
+    name: Intraday Update (every 30 min)
     runs-on: ubuntu-latest
     if: |
-      (github.event_name == 'schedule' && github.event.schedule == '*/10 4-9 * * 1-5') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0,30 4-9 * * 1-5') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'intraday')
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
         run: pip install yfinance pandas numpy requests
 
-      - name: Run intraday report
+      - name: Send intraday report
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_TYPE: intraday
-          GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python bse_radar_bot.py
+        run: python bse-radar-bot/bse_radar_bot.py
 
+  # ──────────────────────────────────────────────────────────────────────────
   post-market:
-    name: Post-Market Report (4:00 PM IST)
+    name: Post-Market (3:45 PM IST)
     runs-on: ubuntu-latest
     if: |
-      (github.event_name == 'schedule' && github.event.schedule == '30 10 * * 1-5') ||
+      (github.event_name == 'schedule' && github.event.schedule == '15 10 * * 1-5') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'post')
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
         run: pip install yfinance pandas numpy requests
 
-      - name: Run post-market report
+      - name: Send post-market report
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_TYPE: post
-          GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python bse_radar_bot.py
+        run: python bse-radar-bot/bse_radar_bot.py
