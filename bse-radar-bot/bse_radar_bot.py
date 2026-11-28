@@ -1,5 +1,5 @@
 """
-BSE Radar Bot — Production v6.1
+BSE Radar Bot — Production v6.2
 Detailed intraday signals matching the proven format:
 - Stock name + BSE Code
 - BUY/SELL with confidence %
@@ -11,15 +11,23 @@ Detailed intraday signals matching the proven format:
 - Pre-market brief, intraday scanner every 10 min, post-market report
 
 Schedule (IST):
-  - Pre-market :  8:15 AM  → morning brief with all ranked picks
-  - Intraday   : every 10 min, 9:30 AM–3:00 PM → live intraday signals
-  - Post-market:  3:45 PM  → day summary + key setups for next session
+  - Pre-market :  9:00 AM  → morning brief with all ranked picks (Mon–Fri)
+  - Intraday   : every 10 min, 9:30 AM–3:00 PM → live intraday signals (Mon–Fri)
+  - Post-market:  4:00 PM  → day summary + key setups for next session (Mon–Fri)
+
+Weekend/holiday guard (v6.2):
+  - No pre/post reports are sent on Saturdays, Sundays, or NSE/BSE holidays.
+  - The "next market open" line always resolves to the next trading day
+    (e.g. Saturday → Monday 09:15 AM IST), never "tomorrow" on a weekend.
 
 Env vars required:
   TELEGRAM_BOT_TOKEN  — bot token from @BotFather
   TELEGRAM_CHAT_IDS   — comma-separated chat IDs
   TELEGRAM_CHAT_ID    — single chat ID (legacy, also supported)
   REPORT_TYPE         — "pre", "intraday", or "post"
+  DRY_RUN             — "1" to print the report instead of sending (local test)
+  SEND_CLOSED_NOTICE  — "1" to also send a short "market closed" notice on
+                        non-trading days (default: just log and skip)
 
 Disclaimer: Technical analysis only. Not SEBI-registered investment advice.
 """
@@ -29,13 +37,14 @@ import sys
 import json
 import logging
 from datetime import datetime, date, time as dtime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-IST = "Asia/Kolkata"
+IST = ZoneInfo("Asia/Kolkata")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,6 +52,66 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 log = logging.getLogger("bse_radar")
+
+# ── Market hours in IST ───────────────────────────────────────────────────────
+MARKET_OPEN  = dtime(9, 15)
+MARKET_CLOSE = dtime(15, 30)
+
+# NSE/BSE fixed-date holidays (apply every year).
+# Add exchange-declared holidays (Holi, Diwali, Muharram, etc.) as they are announced.
+# Each entry is a "month-day" string; the year is derived at runtime.
+NSE_HOLIDAYS_MD = {
+    "01-26",  # Republic Day
+    "08-15",  # Independence Day
+    "10-02",  # Gandhi Jayanti
+    "12-25",  # Christmas
+}
+
+
+# ── Time helpers ───────────────────────────────────────────────────────────────
+
+def now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def ist_today() -> date:
+    return now_ist().date()
+
+
+def is_trading_day(d: date | None = None) -> bool:
+    """Return True if `d` (default: today in IST) is an NSE/BSE trading day.
+
+    Saturdays, Sundays and configured holidays are non-trading days.
+    """
+    if d is None:
+        d = ist_today()
+    # Saturday = 5, Sunday = 6
+    if d.weekday() >= 5:
+        return False
+    if d.strftime("%m-%d") in NSE_HOLIDAYS_MD:
+        return False
+    return True
+
+
+def next_trading_day(d: date | None = None) -> date:
+    """Return the next trading day strictly after `d` (default: today in IST)."""
+    if d is None:
+        d = ist_today()
+    candidate = d + timedelta(days=1)
+    while not is_trading_day(candidate):
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def next_market_open_str() -> str:
+    """Human-readable next market open, e.g. 'Monday, 30 Nov 2026 at 09:15 AM IST'."""
+    nd = next_trading_day()
+    return nd.strftime("%A, %d %b %Y") + " at 09:15 AM IST"
+
+
+def is_market_open() -> bool:
+    t = now_ist().time()
+    return is_trading_day() and MARKET_OPEN <= t <= MARKET_CLOSE
 
 
 # ── Stock universe with BSE numeric codes ──────────────────────────────────────
@@ -84,23 +153,6 @@ TARGET2_PCT = 1.0   # Target 2 = +1.0% for BUY, -1.0% for SELL
 STOPLOSS_PCT = 0.5  # Stop Loss = -0.5% for BUY, +0.5% for SELL
 MIN_CONFIDENCE_SHOW = 70  # only show picks >= 70% confidence
 MIN_RR_RATIO = 1.5   # minimum risk:reward ratio
-
-# Market hours in IST
-MARKET_OPEN  = dtime(9, 15)
-MARKET_CLOSE = dtime(15, 30)
-
-
-# ── Time helpers ───────────────────────────────────────────────────────────────
-
-def now_ist() -> datetime:
-    return datetime.now().astimezone(__import__("zoneinfo").ZoneInfo(IST))
-
-def ist_today() -> date:
-    return now_ist().date()
-
-def is_market_open() -> bool:
-    t = now_ist().time()
-    return MARKET_OPEN <= t <= MARKET_CLOSE
 
 
 # ── yfinance helpers ───────────────────────────────────────────────────────────
@@ -1068,7 +1120,7 @@ def build_post_market_report() -> str:
         f"📰 MEDIA & NEWS SENTIMENT WRAP:\n"
         f"• Tone: {regime_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔔 Next live market opens tomorrow at 09:15 AM IST.\n"
+        f"🔔 Next live market opens {next_market_open_str()}.\n"
         f"Pre-market morning brief arrives at ~8:15 AM IST.\n"
         f"📌 <i>Not SEBI-registered investment advice.</i>"
     )
@@ -1098,6 +1150,7 @@ def main() -> None:
     chat_ids_raw = os.environ.get("TELEGRAM_CHAT_IDS", "").strip()
     chat_id_one  = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     report_type  = os.environ.get("REPORT_TYPE", "pre").strip().lower()
+    dry_run      = os.environ.get("DRY_RUN", "").strip() in ("1", "true", "yes", "on")
 
     if not bot_token:
         log.error("TELEGRAM_BOT_TOKEN is not set.")
@@ -1110,8 +1163,41 @@ def main() -> None:
         log.error("TELEGRAM_CHAT_IDS (or TELEGRAM_CHAT_ID) is not set.")
         sys.exit(1)
 
-    log.info("IST time: %s | report_type=%s | chats=%d",
-             now_ist().strftime("%Y-%m-%d %I:%M %p"), report_type, len(chat_ids))
+    log.info("IST time: %s | report_type=%s | chats=%d | dry_run=%s",
+             now_ist().strftime("%Y-%m-%d %I:%M %p"), report_type, len(chat_ids), dry_run)
+
+    # ── Weekend / holiday guard (v6.2) ──────────────────────────────────────
+    # Do not send pre/post reports on Saturdays, Sundays or NSE/BSE holidays.
+    # Intraday is already gated by is_market_open() (which now checks trading day).
+    if report_type in ("pre", "post") and not is_trading_day():
+        today = ist_today()
+        reason = "weekend" if today.weekday() >= 5 else "NSE/BSE holiday"
+        nd = next_trading_day()
+        log.info(
+            "Market is closed today (%s — %s). No %s report sent. "
+            "Next market open: %s at 09:15 AM IST.",
+            today.strftime("%A, %d %b %Y"), reason, report_type,
+            nd.strftime("%A, %d %b %Y")
+        )
+        if os.environ.get("SEND_CLOSED_NOTICE", "").strip() in ("1", "true", "yes", "on"):
+            closed_notice = (
+                f"🔔 <b>BSE Radar Bot — Market Closed</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📅 {today.strftime('%d %b %Y (%A)')}\n"
+                f"🇮🇳 NSE/BSE is closed today ({reason}).\n"
+                f"No {report_type} report will be sent.\n"
+                f"🔔 Next market open: {nd.strftime('%A, %d %b %Y')} at 09:15 AM IST.\n"
+                f"📌 <i>Not SEBI-registered investment advice.</i>"
+            )
+            if dry_run:
+                print("---- DRY RUN: closed notice ----")
+                print(closed_notice)
+            else:
+                try:
+                    send_telegram(closed_notice, bot_token, chat_ids)
+                except Exception as exc:
+                    log.error("Closed-notice send failed: %s", exc)
+        return
 
     if report_type == "pre":
         message = build_pre_market_report()
@@ -1128,6 +1214,12 @@ def main() -> None:
 
     if not message:
         log.info("Empty report — nothing to send.")
+        return
+
+    if dry_run:
+        print("---- DRY RUN: report preview ----")
+        print(message)
+        log.info("Dry run complete — report printed above (not sent).")
         return
 
     try:
