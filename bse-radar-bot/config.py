@@ -169,6 +169,23 @@ CONF_MAX = 94
 CONF_STRONG_BONUS = 4   # |score| >= 5
 CONF_VERY_STRONG_BONUS = 4  # |score| >= 8
 
+# ── SEBI regulatory notice ────────────────────────────────────────────────────
+# This bot is a technical-analysis / signal tool. It is NOT SEBI-registered
+# investment advice. SEBI registration is a legal status granted by the Securities
+# and Exchange Board of India to qualified investment advisers (RIA) / research
+# analysts (RA) after NISM certification, net-worth, infrastructure and compliance
+# requirements. Code alone cannot confer SEBI registration.
+SEBI_DISCLAIMER_SHORT = "📌 <b>Not SEBI-registered investment advice.</b> Technical analysis only. Trade at your own risk."
+SEBI_DISCLAIMER_LONG = (
+    "📌 <b>IMPORTANT:</b> This is NOT SEBI-registered investment advice. "
+    "It is an automated technical-analysis signal tool for educational/informational use. "
+    "SEBI registration is a legal status granted only to qualified investment advisers "
+    "(RIA) and research analysts (RA) after NISM certification and formal SEBI approval. "
+    "No algorithm or code can be 'SEBI-registered.' Past performance does not guarantee "
+    "future results. Trade at your own risk and consult a SEBI-registered advisor before "
+    "taking any position."
+)
+
 # ── File / storage paths ──────────────────────────────────────────────────────
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 SIGNAL_LOG = os.path.join(DATA_DIR, "signals.jsonl")

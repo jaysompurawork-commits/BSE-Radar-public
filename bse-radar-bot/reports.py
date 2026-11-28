@@ -8,6 +8,7 @@ from config import (
     POST_MARKET_SETUPS, TARGET1_PCT, TARGET2_PCT, STOPLOSS_PCT,
     MIN_RR_RATIO, next_market_open_str, ist_today, now_ist,
     is_trading_day, next_trading_day,
+    SEBI_DISCLAIMER_SHORT, SEBI_DISCLAIMER_LONG,
 )
 from indicators import (compute_rsi, compute_macd, compute_atr, volume_ratio,
                         bb_position, vwap_confirm, support_resistance,
@@ -489,7 +490,7 @@ def build_pre_market_report() -> str:
     if not ranked:
         lines.append("⚪ No high-conviction setups today. Market is neutral — wait for clarity.\n")
         lines.append(f"🔔 Next market open: {next_market_open_str()}\n")
-        lines.append("📌 <i>Not SEBI-registered investment advice. Trade at your own risk.</i>")
+        lines.append(f"{SEBI_DISCLAIMER_SHORT}")
         return "\n".join(lines)
 
     # Top conviction pick first
@@ -503,7 +504,7 @@ def build_pre_market_report() -> str:
 
     lines.append(
         f"📊 Data: Real NSE/BSE prices (yfinance) · Targets ±{TARGET1_PCT}%/{TARGET2_PCT}% · SL ±{STOPLOSS_PCT}%\n"
-        f"📌 <i>Not SEBI-registered investment advice. Trade at your own risk.</i>\n"
+        f"{SEBI_DISCLAIMER_SHORT}\n"
         f"🤖 BSE Radar Bot v7.0 | Pre-market 9:00 AM IST"
     )
     return "\n".join(lines)
@@ -528,7 +529,7 @@ def build_intraday_report() -> str:
 
     if not ranked:
         lines.append("⚪ No high-confidence intraday signals right now.\n")
-        lines.append("📌 <i>Not SEBI-registered investment advice.</i>")
+        lines.append(f"{SEBI_DISCLAIMER_SHORT}")
         return "\n".join(lines)
 
     for i, (ticker, name, bse_code, sector, sig) in enumerate(ranked, 1):
@@ -537,7 +538,7 @@ def build_intraday_report() -> str:
 
     lines.append(
         f"📊 Data: Real NSE/BSE 5-min prices · Scanner active 9:00 AM–3:15 PM IST, every 10 min\n"
-        f"📌 <i>Not SEBI-registered investment advice.</i>\n"
+        f"{SEBI_DISCLAIMER_SHORT}\n"
         f"🤖 BSE Radar Bot v7.0 | Intraday"
     )
     return "\n".join(lines)
@@ -619,7 +620,7 @@ def build_post_market_report() -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔔 Next market open: {next_market_open_str()}.\n"
         f"Pre-market brief arrives at 9:00 AM IST.\n"
-        f"📌 <i>Not SEBI-registered investment advice.</i>"
+        f"{SEBI_DISCLAIMER_SHORT}"
     )
     return "\n".join(lines)
 
@@ -660,5 +661,5 @@ def build_closed_notice() -> str:
         f"🇮🇳 NSE/BSE is closed today (weekend/holiday).\n"
         f"No report sent.\n"
         f"🔔 Next market open: {nd.strftime('%A, %d %b %Y')} at 09:15 AM IST.\n"
-        f"📌 <i>Not SEBI-registered investment advice.</i>"
+        f"📌 <i>{SEBI_DISCLAIMER_SHORT}</i>"
     )
