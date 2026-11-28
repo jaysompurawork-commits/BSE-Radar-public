@@ -1,73 +1,90 @@
-# BSE Radar Bot — Setup Guide
+# BSE Radar Bot — v7.0 Professional
 
-Runs automatically on GitHub Actions. Your PC does NOT need to be on.
+Professional-grade intraday prediction system for BSE/NSE equities. Runs automatically on GitHub Actions — your PC does NOT need to be on.
 
-## What's new in v6.2
+## What's new in v7.0
 
-- **Weekend & holiday guard**: No pre-market or post-market report is sent on Saturdays, Sundays, or NSE/BSE holidays. The "next market open" line now resolves to the next **trading day** (e.g. Saturday → Monday 09:15 AM IST), never "tomorrow" on a weekend.
-- **Optional closed-day notice**: Set `SEND_CLOSED_NOTICE=1` to send a short "market closed today" message on non-trading days.
-- **Dry-run mode**: Set `DRY_RUN=1` locally to preview the report text instead of sending it to Telegram (great for testing without secrets).
-- **Intraday job**: GitHub Actions now also runs an intraday scanner every 30 min during market hours (weekdays).
-
-## 1. Add Secrets to GitHub
-
-Go to your GitHub repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
-
-Add these secrets:
-
-| Secret Name | Value |
+| Feature | Description |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | Your bot token from @BotFather (e.g. `7123456789:AAFxxx...`) |
-| `TELEGRAM_CHAT_IDS` | Comma-separated chat IDs (e.g. `-1001234567890`) |
-| `TELEGRAM_CHAT_ID` | Single chat ID (legacy, also supported) |
+| **30+ technical indicators** | EMA/SMA/Hull, RSI, MACD, ATR, Bollinger Bands, VWAP, Stochastic, Williams %R, CCI, ROC, OBV, ADX, Parabolic SAR, Ichimoku, Supertrend, Pivots, Donchian, Keltner, MFI, CMF, EFI |
+| **Multi-timeframe confluence** | 9/21 EMA alignment, 20/50 trend, MTF bias, pivot context, ATR-based hold windows |
+| **News sentiment** | Headline sentiment per stock + sector (requires `NEWS_API_KEY`; degrades gracefully without it) |
+| **Institutional flow** | FII/DII direction hook (wired to neutral, ready for NSE/Alpha Vantage endpoint) |
+| **Risk management** | ±0.5% T1, ±1.0% T2, ±0.5% SL, R/R ≥ 1.5 filter, ATR-based holding window |
+| **Performance journal** | Every signal logged to `data/signals.jsonl`; win-rate / expectancy tracking in `backtest.py` |
+| **Weekend/holiday guard** | No pre/post reports on Sat/Sun/NSE holidays; "next market open" always resolves to next trading day |
+| **Dry-run / paper trading** | `DRY_RUN=1` previews reports without sending; `PAPER_TRADING=1` logs signals only |
+| **Professional HTML Telegram reports** | Ranked picks with entry/T1/T2/SL, confluence factors, execution strategy, disclaimer |
 
-### How to get your Chat ID
-
-1. Add your bot to the group/channel as admin
-2. Send any message in the group
-3. Open in browser: `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
-4. Look for `"chat":{"id":-100xxxxxxxxx}` — that number is your Chat ID
-
-## 2. Schedule (IST, Mon–Fri only)
+## Schedule (IST, Mon–Fri only)
 
 | Report | Time (IST) | Days |
 |---|---|---|
-| Pre-Market (BUY/SELL picks) | **9:00 AM** | Mon–Fri |
+| Pre-Market (ranked BUY/SELL picks) | **9:00 AM** | Mon–Fri |
 | Intraday scanner (live signals) | every 30 min, 9:30 AM–2:30 PM | Mon–Fri |
-| Post-Market (day summary) | **4:00 PM** | Mon–Fri |
+| Post-Market (day summary + next-session setups) | **4:00 PM** | Mon–Fri |
 
-The cron schedules are weekday-only (`1-5`), so the bot never fires on a Saturday/Sunday. The weekend guard in the code is a second line of defence for manual/workflow_dispatch runs.
+Cron is weekday-only (`1-5`). The code guard is a second line of defence for manual/workflow_dispatch runs.
 
-## 3. Run Manually
+## 1. Add Secrets to GitHub
 
-1. Go to your GitHub repo → **Actions** tab
-2. Click **BSE Radar Bot** workflow
+Repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+
+| Secret | Value |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
+| `TELEGRAM_CHAT_IDS` | Comma-separated chat IDs |
+| `TELEGRAM_CHAT_ID` | Single chat ID (legacy) |
+| `NEWS_API_KEY` | (optional) NewsAPI key for sentiment |
+| `DRY_RUN` | `1` to preview locally without sending |
+| `SEND_CLOSED_NOTICE` | `1` to send "market closed" notice on holidays |
+
+### Get your Chat ID
+1. Add your bot to the group/channel as admin
+2. Send any message
+3. Open: `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
+4. Use the `"chat":{"id":-100xxxxxxxxx}` number
+
+## 2. Run Manually (GitHub Actions)
+
+1. Repo → **Actions** tab → **BSE Radar Bot v7.0**
+2. **Run workflow** → choose `pre`, `intraday`, or `post`
 3. Click **Run workflow**
-4. Choose `pre`, `intraday`, or `post`
-5. Click green **Run workflow** button
 
-### Local dry-run test
+## 3. Local dry-run test
+
+From the repo root:
 
 ```powershell
-# From the repo root
+$env:TELEGRAM_BOT_TOKEN="dummy"
+$env:TELEGRAM_CHAT_ID="dummy"
 $env:DRY_RUN="1"
 $env:REPORT_TYPE="pre"
 python bse-radar-bot\bse_radar_bot.py
 ```
-This prints the report to your terminal instead of sending it (no Telegram token needed).
 
-## 4. What the Bot Sends
+Prints the report to your terminal instead of sending it (no real token needed).
 
-**Pre-market (9:00 AM IST):** BUY/SELL picks with confidence %, target price, stop-loss — based on real NSE closing data.
+## Project structure
 
-**Intraday:** Top live intraday signals refreshed every 30 min during market hours.
+```
+bse-radar-bot/
+├── bse_radar_bot.py      # entry point (pre/intraday/post + guards)
+├── config.py             # watchlist, constants, time helpers, paths
+├── indicators.py         # 30+ technical indicators
+├── sentiment.py          # news sentiment + FII-DII flow
+├── backtest.py           # signal journal + accuracy/win-rate tracking
+├── reports.py            # signal engine + HTML Telegram formatters
+├── requirements.txt      # Python deps
+├── data/                 # signal/performance/prediction logs (created at runtime)
+├── .github/workflows/bse_radar.yml
+└── README_BOT.md
+```
 
-**Post-market (4:00 PM IST):** Top gainers/losers from today, advance/decline summary, key setups for next session, and the correct next market-open time.
+## Data Source
 
-## 5. Data Source
+All prices are real NSE/BSE data via `yfinance`. News sentiment via NewsAPI (optional). No mock/fake data.
 
-All prices are real NSE data fetched via `yfinance`. No mock/fake data.
+## Disclaimer
 
-## 6. Disclaimer
-
-Not SEBI-registered investment advice. For educational/informational use only.
+Technical analysis + news sentiment only. Not SEBI-registered investment advice. Trade at your own risk. Past performance does not guarantee future results.

@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+lib/
+lib64/
+sdist/
+var/
+wheels/
+share/
+python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data / logs (runtime-generated)
+bse-radar-bot/data/
+bse-radar-bot/*.jsonl
+bse-radar-bot/*.csv
+scan_log.csv
+
+# Secrets / credentials (never commit)
+*.json
+client_secret_*.json
+*.pem
+*.key
+
+# Local test artifacts
+*_test.txt
+pre_test.txt
+pre_market_test.txt
+post_market_test.txt
+
+# Other projects / unrelated folders in this repo root
+blender/
+canva_system/
+jayai/
+youtube-shorts-factory/
+__pycache__/

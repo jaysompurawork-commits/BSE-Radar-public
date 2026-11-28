@@ -1,11 +1,11 @@
-name: BSE Radar Bot
+name: BSE Radar Bot v7.0
 
 on:
   schedule:
     # Pre-market: 9:00 AM IST = 3:30 AM UTC — weekdays only
     - cron: '30 3 * * 1-5'
     # Intraday: every 30 min during market hours (9:30 AM–2:30 PM IST ≈ 4:00–9:00 UTC) — weekdays only
-    - cron: '30 4,5,6,7,8,9 * * 1-5'
+    - cron: '*/30 4,5,6,7,8,9 * * 1-5'
     # Post-market: 4:00 PM IST = 10:30 AM UTC — weekdays only
     - cron: '30 10 * * 1-5'
 
@@ -40,7 +40,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r bse-radar-bot/requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run pre-market report
         env:
@@ -55,7 +55,7 @@ jobs:
     name: Intraday Scanner (every 30 min, market hours)
     runs-on: ubuntu-latest
     if: |
-      (github.event_name == 'schedule' && github.event.schedule == '30 4,5,6,7,8,9 * * 1-5') ||
+      (github.event_name == 'schedule' && github.event.schedule == '*/30 4,5,6,7,8,9 * * 1-5') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'intraday')
 
     steps:
@@ -68,7 +68,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r bse-radar-bot/requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run intraday report
         env:
@@ -96,7 +96,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r bse-radar-bot/requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run post-market report
         env:
