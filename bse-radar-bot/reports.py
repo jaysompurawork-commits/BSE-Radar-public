@@ -287,32 +287,7 @@ def compute_score(df, ticker: str) -> dict:
 
     signal = "BUY" if score >= 0 else "SELL"
 
-    # Confidence
-    factors_hit = sum([
-        abs(rsi - 50) > 15,
-        macd_l != 0,
-        trend_bull_9_21 or trend_bear_9_21,
-        abs(mom) > 0.5,
-        vol >= 1.2,
-        abs(bb_pos - 0.5) > 0.3,
-        abs(stoch_k - 50) > 20,
-        abs(willr) > 40,
-        abs(cci) > 100,
-        abs(roc) > 1.0,
-        obv_rising is not None,
-        adx_val >= 20,
-        abs(last_price - sar_val) > 0.01,
-        ichi_signal != "Neutral",
-        vwap_bull or not vwap_bull,
-        abs(news_score) > 0.1,
-    ])
-    confidence = min(94, 50 + factors_hit * 3)
-    if abs(score) >= 5:
-        confidence = min(95, confidence + 4)
-    if abs(score) >= 9:
-        confidence = min(98, confidence + 4)
-
-    # Entry / targets / SL
+    # Entry / targets / SL (computed before quality gate so rr_ratio is available)
     if signal == "BUY":
         entry = last_price
         target1 = round(entry * (1 + TARGET1_PCT / 100), 2)
@@ -328,11 +303,51 @@ def compute_score(df, ticker: str) -> dict:
     reward = abs(target2 - entry)
     rr_ratio = round(reward / risk, 2) if risk > 0 else 0.0
 
-    # ATR-based hold window
+    # ── Confidence calibration (multi-factor agreement) ─────────────────────
+    # Base confidence from how many independent factors agree with the signal.
+    bullish_factors = sum([
+        trend_bull_9_21, trend_bull_20_50, macd_bull, rsi < 60, mom > 0,
+        vol >= 1.2, vwap_bull, bb_pos > 0.5, stoch_bull, obv_rising,
+        adx_val >= 20, super_dir == "Bullish", last_price > sar_val,
+        ichi_signal == "Bullish", news_score > 0, fii_label == "Bullish",
+    ])
+    bearish_factors = sum([
+        trend_bear_9_21, trend_bear_20_50, not macd_bull, rsi > 40, mom < 0,
+        vol >= 1.2, not vwap_bull, bb_pos < 0.5, not stoch_bull, not obv_rising,
+        adx_val >= 20, super_dir == "Bearish", last_price < sar_val,
+        ichi_signal == "Bearish", news_score < 0, fii_label == "Bearish",
+    ])
+    agreeing = bullish_factors if signal == "BUY" else bearish_factors
+    total_factors = 16
+
+    # Confidence scales with agreement; require trend + volume for high confidence.
+    base = 40 + int((agreeing / total_factors) * 40)   # 40–80 range
+    confidence = base
+    if adx_val >= 20 and vol >= 1.2:
+        confidence = min(90, confidence + 6)            # trend + volume boost
+    if abs(score) >= 6:
+        confidence = min(94, confidence + 4)            # strong confluence boost
+    if abs(score) >= 10:
+        confidence = min(97, confidence + 3)            # very strong confluence
+    if agreeing < 6:
+        confidence = min(confidence, 65)                # cap weak agreement
+    confidence = max(50, min(97, confidence))
+
+    # ── Quality filters (accuracy gate) ─────────────────────────────────────
+    # Only surface high-quality setups: decent RR and minimum confidence.
+    quality_pass = (
+        confidence >= MIN_CONFIDENCE_SHOW
+        and rr_ratio >= MIN_RR_RATIO
+        and agreeing >= 7
+    )
+
+    # ATR-based hold window (tighter for faster intraday)
     atr_pct = (atr / last_price * 100) if last_price > 0 else 1.0
-    if atr_pct > 2.0:
+    if atr_pct > 2.5:
+        hold_mins = 60
+    elif atr_pct > 1.5:
         hold_mins = 90
-    elif atr_pct > 1.0:
+    elif atr_pct > 0.8:
         hold_mins = 120
     else:
         hold_mins = 150
@@ -371,6 +386,8 @@ def compute_score(df, ticker: str) -> dict:
         "news_score": news_score,
         "news_label": news_label,
         "fii_label": fii_label,
+        "quality_pass": quality_pass,
+        "agreeing_factors": agreeing,
     }
 
 
@@ -427,7 +444,10 @@ def _scan_watchlist(fetch_kwargs, min_conf=MIN_CONFIDENCE_SHOW, limit=None):
             if df is None or df.empty or len(df) < 25:
                 continue
             sig = compute_score(df, ticker)
+            # Accuracy gate: only high-quality setups pass
             if sig["confidence"] < min_conf:
+                continue
+            if not sig.get("quality_pass", False):
                 continue
             ranked.append((ticker, info_dict["name"], info_dict["bse_code"],
                            info_dict.get("sector", "-"), sig))
@@ -461,10 +481,10 @@ def build_pre_market_report() -> str:
         f"🏛️ Market Bias: {regime_emoji} {regime_text}\n"
         f"📰 Market Sentiment: {mkt_label}\n"
     )
+    lines = [header]
 
     ranked = _scan_watchlist({"period": "5d", "interval": "5m", "min_rows": 40},
                              min_conf=MIN_CONFIDENCE_SHOW, limit=PRE_MARKET_MAX_PICKS)
-    lines = [header]
 
     if not ranked:
         lines.append("⚪ No high-conviction setups today. Market is neutral — wait for clarity.\n")
@@ -516,7 +536,7 @@ def build_intraday_report() -> str:
         lines.append(f"⏰ {today} {now_str}\n\n")
 
     lines.append(
-        f"📊 Data: Real NSE/BSE 5-min prices · Scanner active 9:30 AM–3:00 PM IST\n"
+        f"📊 Data: Real NSE/BSE 5-min prices · Scanner active 9:00 AM–3:15 PM IST, every 10 min\n"
         f"📌 <i>Not SEBI-registered investment advice.</i>\n"
         f"🤖 BSE Radar Bot v7.0 | Intraday"
     )
@@ -598,7 +618,7 @@ def build_post_market_report() -> str:
         f"📰 Media Sentiment: {mkt_label}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔔 Next market open: {next_market_open_str()}.\n"
-        f"Pre-market brief arrives ~9:00 AM IST.\n"
+        f"Pre-market brief arrives at 9:00 AM IST.\n"
         f"📌 <i>Not SEBI-registered investment advice.</i>"
     )
     return "\n".join(lines)

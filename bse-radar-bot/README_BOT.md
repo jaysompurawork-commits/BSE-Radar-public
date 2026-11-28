@@ -21,8 +21,8 @@ Professional-grade intraday prediction system for BSE/NSE equities. Runs automat
 | Report | Time (IST) | Days |
 |---|---|---|
 | Pre-Market (ranked BUY/SELL picks) | **9:00 AM** | Mon–Fri |
-| Intraday scanner (live signals) | every 30 min, 9:30 AM–2:30 PM | Mon–Fri |
-| Post-Market (day summary + next-session setups) | **4:00 PM** | Mon–Fri |
+| Intraday scanner (live signals) | every 10 min, 9:00 AM–3:15 PM | Mon–Fri |
+| Post-Market (day summary + next-session setups) | **3:20 PM** | Mon–Fri |
 
 Cron is weekday-only (`1-5`). The code guard is a second line of defence for manual/workflow_dispatch runs.
 

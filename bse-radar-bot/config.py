@@ -10,10 +10,12 @@ from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 
 # ── Market hours (IST) ────────────────────────────────────────────────────────
-MARKET_OPEN  = dtime(9, 15)
-MARKET_CLOSE = dtime(15, 30)
-PRE_MARKET_START = dtime(9, 0)
-POST_MARKET_END  = dtime(15, 30)
+# Regular session: 9:15 AM – 3:30 PM. We run predictions 9:00 AM – 3:15 PM,
+# post-market report at 3:20 PM (per user request).
+MARKET_OPEN  = dtime(9, 0)
+MARKET_CLOSE = dtime(15, 15)
+PRE_MARKET_TIME  = dtime(9, 0)
+POST_MARKET_TIME = dtime(15, 20)
 
 # ── NSE/BSE trading calendar (fixed-date holidays) ────────────────────────────
 # Add exchange-declared holidays (Holi, Diwali, Muharram, etc.) as announced.
@@ -57,12 +59,24 @@ def next_trading_day(d: date | None = None) -> date:
 
 def next_market_open_str() -> str:
     nd = next_trading_day()
-    return nd.strftime("%A, %d %b %Y") + " at 09:15 AM IST"
+    return nd.strftime("%A, %d %b %Y") + " at 09:00 AM IST"
 
 
 def is_market_open() -> bool:
+    """Market prediction window: 9:00 AM – 3:15 PM IST, trading days only."""
     t = now_ist().time()
     return is_trading_day() and MARKET_OPEN <= t <= MARKET_CLOSE
+
+
+def is_prediction_window() -> bool:
+    """Alias for the active intraday prediction window."""
+    return is_market_open()
+
+
+def is_post_market_time() -> bool:
+    """True when it's post-market report time (3:20 PM IST)."""
+    t = now_ist().time()
+    return is_trading_day() and t >= POST_MARKET_TIME
 
 
 # ── Stock universe (yfinance ticker -> {name, bse_code, sector}) ──────────────

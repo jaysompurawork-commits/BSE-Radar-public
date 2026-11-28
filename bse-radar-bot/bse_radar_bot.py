@@ -101,10 +101,13 @@ def main() -> None:
                     log.error("Closed-notice send failed: %s", exc)
         return
 
-    # ── Intraday: only during market hours ──────────────────────────────────
-    from config import is_market_open
-    if report_type == "intraday" and not is_market_open():
-        log.info("Market closed right now — skipping intraday send.")
+    # ── Intraday: only during prediction window (9:00 AM – 3:15 PM) ─────────
+    from config import is_prediction_window, is_post_market_time
+    if report_type == "intraday" and not is_prediction_window():
+        log.info("Outside prediction window (9:00 AM–3:15 PM) — skipping intraday send.")
+        return
+    if report_type == "post" and not is_post_market_time():
+        log.info("Not post-market time (3:20 PM+) — skipping post send.")
         return
 
     # ── Build message ───────────────────────────────────────────────────────
